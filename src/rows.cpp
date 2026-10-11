@@ -33,6 +33,7 @@ static Row* g_rows[] = {
     &row_TEXANIM001,
     &row_SR003,
     &row_DEVTURBO,
+    &row_DEVSTOCK,
     &row_FX010,
     &row_DIAG_BTLSIG,
     &row_DIAG_DRAWSTEP,

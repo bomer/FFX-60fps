@@ -122,6 +122,7 @@
     <ClCompile Include="src\rows\UI-SPH-002.cpp" />
     <ClCompile Include="src\rows\UI-014.cpp" />
     <ClCompile Include="src\rows\UI-BTLL1.cpp" />
+    <ClCompile Include="src\rows\DEV-STOCK.cpp" />
     <ClCompile Include="src\rows\DEV-TURBO.cpp" />
     <ClCompile Include="src\rows\FX-010.cpp" />
     <ClCompile Include="src\rows\DIAG-HANGDUMP.cpp" />

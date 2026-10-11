@@ -136,6 +136,7 @@ extern Row row_MAG025;                           // rows/MAG-025.cpp (DLL-called
 extern Row row_UI001;                            // rows/UI-001.cpp
 extern Row row_UI017;                           // rows/UI-017.cpp (pad latch per logic tick, K4)
 extern Row row_UISPH001;                        // rows/UI-SPH-001.cpp (Sphere Grid update per logic tick)
+extern Row row_DEVSTOCK;                        // rows/DEV-STOCK.cpp (test tool: Ctrl+F5 toggles stock pacing)
 extern Row row_DEVTURBO;                        // rows/DEV-TURBO.cpp (test tool: hold a key to fast-forward)
 extern Row row_UIBTLL1;                         // rows/UI-BTLL1.cpp (battle L1 party swap presses kept)
 extern Row row_UI014;                           // rows/UI-014.cpp (minimap arrow pulse per logic tick)

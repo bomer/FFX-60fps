@@ -46,7 +46,55 @@ typedef void(__cdecl* walk_t)(uint8_t* head);
 static walk_t g_walk = nullptr;
 static uint32_t g_dump_tick = 0;
 
+// DIAG-BTLSIG-XREC: on every logic walk (after it), log each node whose state handler, state level, wait count
+// or particle program (node+0x280 bit 0 = alive, +0x298 = age) changed, plus births and deaths. Timeline input
+// for stock vs 60 comparisons (Vorban's Mortar, magic_0360).
+static int g_xrec = 0;
+struct XSeen { uint8_t* nd; uint32_t h, st, w, prog, cb; uint32_t gen; };
+static XSeen g_xs[64];
+static uint32_t g_xgen = 0;
+static volatile LONG g_xlines = 0;
+
+static void xrec_log(uint8_t* head) {
+    if (g_xlines > 4000) return;
+    g_xgen++;
+    __try {
+        uint8_t* tail = head + 0xBC;
+        int n = 0;
+        for (uint8_t* nd = *(uint8_t**)(head + 8); nd && nd != tail && n < 32; nd = *(uint8_t**)(nd + 8), n++) {
+            uint32_t* u = (uint32_t*)nd;
+            uint32_t st = u[0x2B];
+            uint32_t h = st < 8 ? u[3 + st] : 0;
+            uint32_t w = st < 8 ? u[0xB + st * 4] : 0;
+            uint32_t prog = (u[0xA0] & 1) ? (u[0xA6] | 0x80000000u) : 0;   // +0x280 flags, +0x298 age
+            XSeen* s = nullptr;
+            for (XSeen& x : g_xs) if (x.nd == nd) { s = &x; break; }
+            bool born = !s;
+            if (!s) for (XSeen& x : g_xs) if (!x.nd || x.gen + 1 < g_xgen) { s = &x; break; }
+            if (!s) continue;
+            bool chg = born || s->h != h || s->st != st || (s->w != w && s->w != w + 1) ||       // a wait set, not a countdown step
+                       ((s->prog ^ prog) & 0x80000000u) || s->cb != u[0x2C];
+            if (chg) {
+                char hs[96];
+                describe((uint8_t*)(uintptr_t)h, hs, sizeof(hs));
+                InterlockedIncrement(&g_xlines);
+                log_line("XREC tick=%u %s node=%p lvl=%u h=%s wait=%d prog=%s age=0x%X pos=%.1f,%.1f,%.1f",
+                         g_tick, born ? "BORN" : "chg ", nd, st, hs, (int)w, (prog & 0x80000000u) ? "on " : "off",
+                         prog & 0x7FFFFFFFu, *(float*)(nd + 0xD0), *(float*)(nd + 0xD4), *(float*)(nd + 0xD8));
+            }
+            s->nd = nd; s->h = h; s->st = st; s->w = w; s->prog = prog; s->cb = u[0x2C]; s->gen = g_xgen;
+        }
+        for (XSeen& x : g_xs) if (x.nd && x.gen != g_xgen) {
+            InterlockedIncrement(&g_xlines);
+            log_line("XREC tick=%u GONE node=%p", g_tick, x.nd);
+            x.nd = nullptr;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { log_line("XREC: read fault"); }
+}
+
 static void __cdecl h_walk(uint8_t* head) {
+    if (g_xrec && pacing_kind() != INV_BUILD) { g_walk(head); xrec_log(head); return; }
     if (pacing_kind() != INV_BUILD && g_tick - g_dump_tick >= 30 && InterlockedCompareExchange(&g_lines, 0, 0) < 1500) {
         g_dump_tick = g_tick;
         __try {
@@ -68,6 +116,8 @@ static void __cdecl h_walk(uint8_t* head) {
 }
 
 static bool install() {
+    g_xrec = config_row("DIAG-BTLSIG-XREC", 0);
+    if (g_xrec) log_line("  DIAG-BTLSIG-XREC: family-X node transitions logged on every logic walk (XREC lines)");
     // The battle effect signal handler FUN_00788920(arg)
     uint8_t* fn = sig_find_unique("DIAG-BTLSIG FUN_00788920",
         "55 8B EC 53 E8 ?? ?? ?? ?? 8B 5D 08 85 C0 74 10 0F B6 C3 50 E8", 0x788920);
