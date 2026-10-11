@@ -37,6 +37,9 @@ static volatile LONG g_tick = 0;                 // logic invocations since armi
 static volatile LONG g_cast_tick = -1;           // g_tick at the last cast, -1 = none
 static int      g_last_cmd = 0;
 
+static int      g_mot_n = 0;                     // LAB-001-MOTCLK: invocations to log after each cast (0 = off)
+static int      g_mot_left = 0;
+static uint8_t* g_mot_actor = nullptr;           // caster's actor (battle chr +0, Fahrenheit Chr.actor)
 static char g_names[0x400][32];                  // index id - 0x3000
 static uint16_t g_list[0x400];                   // list mode: "run" ids in file order
 static int      g_list_n = 0, g_list_pos = 0;
@@ -159,6 +162,7 @@ static void __cdecl h_menu(uint32_t id) {
                          g_cmd, cmd_name(g_cmd), id, tg, rec[0x1A], rec[0x19],
                          *(uint16_t*)(rec + 0x10), *(uint16_t*)(rec + 0x12), *(int*)(c + 0x5D0), *(int*)(c + 0x5D4),
                          target_hp(tg), g_tick);
+                if (g_mot_n) { g_mot_actor = *(uint8_t**)c; g_mot_left = g_mot_n; }
                 int r = g_submit(cue, 0, 0);
                 log_line("LAB-001: submit returned %d", r);
                 return;
@@ -237,6 +241,7 @@ static bool install() {
     g_menu = (menu_t)call_target(site);
     g_cmd = config_row("LAB-001-CMD", 0x3000);
     g_list_mode = g_cmd == 0;
+    g_mot_n = config_row("LAB-001-MOTCLK", 0);
     g_key = config_row("LAB-001-KEY", VK_NUMPAD1);
     g_offkey = config_row("LAB-001-OFFKEY", VK_NUMPAD3);
     load_names();
@@ -292,6 +297,19 @@ static void pre() {
 
 // Per logic tick while armed and in a fight: debug flags on, monster CTB counters held high.
 static void post() {
+    // LAB-001-MOTCLK: the caster actor's keyframe fields after every invocation (SMOOTH-003 field map: +0x714 seq,
+    // +0x718 start, +0x71C end, +0x724 loops, +0x740 clock, +0x744 sample clock, +0x7DC done). Kind L = logic,
+    // B = render-only, K = backlog, S = stock. With SMOOTH on, B rows include its half step (restored at the next pre).
+    if (g_mot_left > 0 && g_mot_actor) {
+        g_mot_left--;
+        __try {
+            const uint8_t* a = g_mot_actor;
+            log_line("LAB-001 mot: %c tick %ld seq %08X start %d end %d loops %d clock %d sample %d done %u",
+                     "LBKS"[pacing_kind() & 3], g_tick, *(uint32_t*)(a + 0x714), *(int32_t*)(a + 0x718), *(int32_t*)(a + 0x71C),
+                     *(int32_t*)(a + 0x724), *(int32_t*)(a + 0x740), *(int32_t*)(a + 0x744), a[0x7DC]);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { g_mot_left = 0; }
+    }
     if (!g_armed || pacing_kind() == INV_BUILD) return;
     g_tick++;
     if (g_btl[0x10] != 1) return;
