@@ -137,6 +137,7 @@ extern Row row_UISPH001;                        // rows/UI-SPH-001.cpp (Sphere G
 extern Row row_DEVTURBO;                        // rows/DEV-TURBO.cpp (test tool: hold a key to fast-forward)
 extern Row row_UIBTLL1;                         // rows/UI-BTLL1.cpp (battle L1 party swap presses kept)
 extern Row row_UI014;                           // rows/UI-014.cpp (minimap arrow pulse per logic tick)
+extern Row row_TEXANIM001;                      // rows/TEXANIM-001.cpp (chr texture animation per logic tick)
 extern Row row_UISPH002;                        // rows/UI-SPH-002.cpp (Sphere Grid particles paused on render-only)
 uint8_t* mag006_entry();                        // Ppp_ProgramStep entry (null if MAG-006 is off)
 bool     mag006_pause_exe_caller(uint8_t* ret); // MAG-006 pauses this EXE call site like a DLL caller
