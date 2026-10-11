@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: Apache-2.0
+// MAG-018: family-E magic DLLs cache "paused" (exec==0) in their draw and their update reads it. With MAG-008
+// the update runs right after a render-only draw and never advances (Ixion soft-lock). Each logic invocation
+// resets a stale cache and pause flag to what a stock draw would leave.
+// Details: docs/fps60/rows/MAG-018.md
+#include "../fps60.h"
+#include <string.h>
+
+enum { MAX_MODS = 8 };
+struct FamE {
+    uint8_t*  mod;
+    uint32_t  size;
+    bool      scanned;
+    volatile int32_t*  cache;       // DLL global (0x100FB684 in 0597)
+    int32_t* volatile* ptr_var;     // DLL global holding the pause-flag pointer (0x100FF218 in 0597)
+    char      name[24];
+};
+static FamE g_mods[MAX_MODS];
+static volatile LONG g_resets = 0, g_pause_resets = 0;
+
+// Exec-pause setter: call slot +0x3F4 (exec count); 0 -> *ptr = 1, cache = 1; else both 0
+static const char PAT[] =
+    "8B 80 F4 03 00 00 FF D0 85 C0 A1 ?? ?? ?? ?? 75 11 "
+    "C7 00 01 00 00 00 C7 05 ?? ?? ?? ?? 01 00 00 00 C3 "
+    "C7 00 00 00 00 00 C7 05 ?? ?? ?? ?? 00 00 00 00 C3";
+
+// Shared with MAG-021: number of exec-pause setters in a loaded module's code (1 = family E with this
+// shape); *hit = the first one.
+int famE_find_setter(uint8_t* mod, uint32_t size, uint8_t** hit_out) {
+    int hits = 0;
+    uint8_t* hit = sig_scan_module(mod, size, PAT, &hits);
+    if (hit_out) *hit_out = hit;
+    return hits;
+}
+
+static void scan(FamE& m) {
+    m.scanned = true;
+    uint8_t* hit = nullptr;
+    int hits = famE_find_setter(m.mod, m.size, &hit);
+    if (hits != 1) {
+        if (hits > 1) log_line("MAG-018: %s has %d pause setters - not handled", m.name, hits);
+        m.mod = nullptr;                          // not family E (or ambiguous): forget it
+        return;
+    }
+    uint32_t c1 = *(uint32_t*)(hit + 25), c2 = *(uint32_t*)(hit + 42), pv = *(uint32_t*)(hit + 11);
+    uint32_t lo = (uint32_t)(uintptr_t)m.mod, hi = lo + m.size;
+    if (c1 != c2 || c1 < lo || c1 >= hi || pv < lo || pv >= hi) {
+        log_line("MAG-018: %s pause setter operands out of range - not handled", m.name);
+        m.mod = nullptr;
+        return;
+    }
+    m.cache = (volatile int32_t*)(uintptr_t)c1;
+    m.ptr_var = (int32_t* volatile*)(uintptr_t)pv;
+    log_line("MAG-018: %s exec-pause setter at gva 0x%08X: cache gva 0x%08X, pause-pointer var gva 0x%08X",
+             m.name, 0x10000000u + (uint32_t)(hit - m.mod), 0x10000000u + (c1 - lo), 0x10000000u + (pv - lo));
+}
+
+// magic_mods.cpp, loader lock
+static void on_load(uint8_t* base, uint32_t size, const char* name) {
+    for (int i = 0; i < MAX_MODS; i++) {
+        if (g_mods[i].mod) continue;
+        g_mods[i].size = size;
+        g_mods[i].scanned = false;
+        g_mods[i].cache = nullptr;
+        g_mods[i].ptr_var = nullptr;
+        memset(g_mods[i].name, 0, sizeof(g_mods[i].name));
+        strncpy(g_mods[i].name, name, sizeof(g_mods[i].name) - 1);
+        g_mods[i].mod = base;                 // publish last
+        return;
+    }
+}
+
+static void on_unload(uint8_t* base) {
+    for (int i = 0; i < MAX_MODS; i++) if (g_mods[i].mod == base) g_mods[i].mod = nullptr;
+}
+
+static bool install() {
+    if (!magic_mods_subscribe("MAG-018", on_load, on_unload)) return false;
+    log_line("  MAG-018: watching magic DLL loads for the family-E exec-pause setter");
+    return true;
+}
+
+static void pre() {
+    bool logic = pacing_kind() != INV_BUILD;
+    for (int i = 0; i < MAX_MODS; i++) {
+        FamE& m = g_mods[i];
+        if (!m.mod) continue;
+        __try {
+            if (!m.scanned) scan(m);
+            if (!m.mod || !m.cache || !logic || g_disabled) continue;
+            if (*m.cache == 1) {
+                *m.cache = 0;
+                InterlockedIncrement(&g_resets);
+                int32_t* pf = *m.ptr_var;
+                if (pf && *pf == 1) { *pf = 0; InterlockedIncrement(&g_pause_resets); }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            log_line("MAG-018: fault 0x%08lX on %s - module dropped", GetExceptionCode(), m.name);
+            m.mod = nullptr;
+        }
+    }
+    static LONG reported = 0;
+    if (!reported && g_resets > 0) {
+        reported = 1;
+        log_line("MAG-018: first reset of a stale exec-pause cache at a logic invocation (pause flag reset too: %ld)", g_pause_resets);
+    }
+}
+
+Row row_MAG018 = {
+    "MAG-018",
+    "family-E magic DLLs: stale (exec==0) pause cache and pause flag reset at logic invocations",
+    1, install, pre, nullptr, 0
+};

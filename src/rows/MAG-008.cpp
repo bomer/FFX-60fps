@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+// On render-only frames the engine's exec==0 fallback runs every summon/spell overlay's update, so summon
+// choreography runs at 2x while actors don't. This row skips that one dispatch on render-only frames.
+// Details: docs/fps60/rows/MAG-008.md
+#include "../fps60.h"
+#include <string.h>
+
+typedef void(__cdecl* dispatch_t)(int);
+
+static uint8_t*   g_site = nullptr;      // the E8 at 0x8210AC
+static dispatch_t g_dispatch = nullptr;  // MsBattleScene_DrawDispatch, 0x787E00
+static volatile LONG g_skipped = 0;
+static volatile LONG g_passed = 0;
+void (*g_mag008_build_hook)() = nullptr;  // MAG-021: runs in place of the skipped dispatch
+void* mag008_dispatch() { return (void*)g_dispatch; }
+
+static void __cdecl h_fallback_dispatch(int pass) {
+    if (row_MAG008.on && !g_disabled && pacing_kind() == INV_BUILD) {
+        InterlockedIncrement(&g_skipped);
+        where_sub(0x21);                                 // DIAG-HANGDUMP: MAG-021 replay (0x22 = after)
+        if (g_mag008_build_hook) g_mag008_build_hook();
+        where_sub(0x22);
+        return;
+    }
+    InterlockedIncrement(&g_passed);
+    where_sub(0x23);                                     // DIAG-HANGDUMP: battle scene dispatch (0x24 = after)
+    g_dispatch(pass);
+    where_sub(0x24);
+}
+
+static bool install() {
+    // Sg_MainLoop: if exec==0, call MsBattleScene_DrawDispatch(0), then the camera fallback
+    uint8_t* at = sig_find_unique("MAG-008 exec==0 fallback (Sg_MainLoop)",
+        "E8 ?? ?? ?? ?? 85 C0 75 1C 50 E8 ?? ?? ?? ?? 83 C4 04 80 3D ?? ?? ?? ?? 00 74 0A E8", 0x8210A2);
+    if (!at) return false;
+    if (call_target(at) != (uint8_t*)g_get_exec) {
+        log_line("  MAG-008: first CALL is not Sg_GetCurExecFrames - refused");
+        return false;
+    }
+    g_site = at + 0x0A;
+    uint8_t* target = call_target(g_site);
+    // MsBattleScene_DrawDispatch: prologue, loads the pass argument and tests it
+    if (!sig_match(target, "55 8B EC 53 8B 5D 08 8B C3 56 83 E8 00")) {
+        log_line("  MAG-008: CALL target %p is not MsBattleScene_DrawDispatch (prologue mismatch) - refused", target);
+        return false;
+    }
+    g_dispatch = (dispatch_t)target;
+    if (!patch_call_rel32(g_site, target, (void*)&h_fallback_dispatch)) {
+        log_line("  MAG-008: patch failed");
+        return false;
+    }
+    log_line("  MAG-008: CALL at gva=0x%08X -> stub (DrawDispatch gva=0x%08X skipped on render-only invocations)",
+             rt_to_gva_exe(g_site), rt_to_gva_exe(target));
+    return true;
+}
+
+static void post() {
+    static LONG reported = 0;
+    if (!reported && g_skipped > 0) {
+        reported = 1;
+        log_line("MAG-008: first skip of the exec==0 dispatch (skipped=%ld passed=%ld)", g_skipped, g_passed);
+    }
+}
+
+Row row_MAG008 = {
+    "MAG-008",
+    "skip MsBattleScene_DrawDispatch(0) on render-only invocations (summon/overlay update, OPU pass 0)",
+    1, install, nullptr, post, 0
+};

@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: Apache-2.0
+// fps60: the 60fps mod for FFX HD, a dbghelp.dll proxy. pacing.cpp makes every other Sg_MainLoop invocation
+// render-only; rollback.cpp and rows.cpp keep game state stepping once per logic tick.
+// Addresses: gva = Ghidra VA, rt = runtime; every address comes from sigs.cpp, none is hardcoded.
+// Details: docs/fps60/architecture.md
+#pragma once
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <stdint.h>
+#include <stddef.h>
+
+// ---------------------------------------------------------------- log.cpp
+void log_open();                                 // fps60.log next to FFX.exe
+void log_line(const char* fmt, ...);             // timestamped, flushed per line
+void game_dir(wchar_t* out, size_t cap);         // directory of FFX.exe, with trailing '\'
+
+// ---------------------------------------------------------------- config.cpp
+enum AltBacklog { ALT_BACKLOG_LOGIC = 0, ALT_BACKLOG_TOGGLE = 1 };
+enum ExecMethod { EXEC_SETTER = 0, EXEC_BYTE = 1 };
+
+struct Config {
+    int enabled;                 // 0 = pure dbghelp forwarder
+    int pacing;                  // 1 = 60 Hz (divider 1 + exec alternation), 0 = stock pacing
+    int alt_backlog;             // skip-render backlog invocations: logic = exec 1, parity unchanged
+    int exec_method;
+    int rollback;                // master switch for the rollback engine
+    int unpack_timeout_s;
+    int log_pacing_events;       // log divider requests / re-asserts (rate-limited)
+    int crash_dump_mem;          // 1 = the game's crash dump also holds heap + module data (MiniDumpWithPrivateReadWriteMemory)
+};
+extern Config g_cfg;
+void config_load();
+int  config_row(const char* row_id, int def);   // [rows] ROW_ID=0|1
+
+
+// ---------------------------------------------------------------- sigs.cpp (ported from FRAMEDIFF)
+struct Sym {
+    const char* name;
+    uint8_t*    rt;              // resolved runtime address (nullptr = unresolved)
+    uint32_t    expected_gva;    // logged only
+    bool        required;
+};
+bool        sigs_text_ready();                   // cheap readiness probe (DRM unpack)
+bool        sigs_resolve_all();                  // false = a REQUIRED sig failed -> install nothing
+uint8_t*    sym_rt(const char* name);            // nullptr if unknown / unresolved
+int         sym_count();
+const Sym*  sym_at(int i);
+uint32_t    rt_to_gva_exe(const void* rt);
+uint8_t*    exe_base();
+uint32_t    exe_size();
+uint8_t*    sig_find_unique(const char* label, const char* pattern, uint32_t expected_gva); // rows
+uint8_t*    call_target(const uint8_t* site);    // target of E8 rel32, or null
+uint8_t*    jmp_target(const uint8_t* site);     // target of E9 rel32, or null
+uint8_t*    read_abs(const uint8_t* at);         // absolute address operand at `at` (relocated)
+bool        sig_match(const void* at, const char* pattern);   // bytes at a resolved address (fault-safe)
+// Scan a loaded module's executable sections; *hits = match count (capped at 9); `accept` filters.
+uint8_t*    sig_scan_module(uint8_t* base, uint32_t size, const char* pattern, int* hits,
+                            bool (*accept)(const uint8_t*) = nullptr);
+
+typedef void(__cdecl* set_exec_t)(int);
+typedef int (__cdecl* get_exec_t)(void);
+typedef void(__cdecl* set_divider_t)(uint32_t);
+extern set_exec_t    g_set_exec;
+extern get_exec_t    g_get_exec;
+extern set_divider_t g_set_divider_orig;         // trampoline once hooked, else the original
+extern void*         g_sg_mainloop;
+extern uint8_t*      g_mainloop_callsite;        // the E8 of CALL Sg_MainLoop in the runner
+extern volatile int8_t*   g_exec_byte;
+extern volatile uint32_t* g_divider;
+extern volatile int32_t*  g_backlog_count;
+extern volatile int32_t*  g_skip_render;
+extern volatile uint32_t* g_frame_counter;
+extern volatile uint32_t* g_vblank;
+
+// ---------------------------------------------------------------- hooks.cpp
+bool hooks_install_mainloop();                   // init thread
+void hooks_install_divider_on_game_thread();     // called from the first pre()
+extern volatile LONG g_disabled;                 // any fault -> 1, hooks become pass-through
+extern bool g_divider_hooked;
+bool patch_call_rel32(uint8_t* site, void* old_target, void* new_target);
+
+// ---------------------------------------------------------------- pacing.cpp
+// Per Sg_MainLoop invocation, in this order: pacing_pre, rollback_pre, rows_pre,
+// Sg_MainLoop, rows_post, rollback_post, pacing_post (capture points interleaved, see below).
+enum InvKind { INV_LOGIC = 0, INV_BUILD = 1, INV_BACKLOG = 2, INV_STOCK = 3 };
+void pacing_pre();
+void pacing_post();
+bool pacing_divider_request(uint32_t req);       // from the divider hook; true = swallow
+bool pacing_active();                            // 60 Hz pacing currently applied
+int  pacing_kind();                              // InvKind of the current invocation
+void pacing_hold_stock(const char* who, bool hold); // a row asks for stock pacing (e.g. FMV)
+
+// ---------------------------------------------------------------- rollback.cpp
+// A span is snapshotted at the start of every INV_BUILD invocation and written back at its end,
+// so render-only invocations cannot advance it. Resolvers run at every snapshot (heap pointers).
+typedef bool (*span_resolver_t)(void* ctx, uint8_t** base, uint32_t* len);
+bool rollback_add_static(const char* row_id, uint8_t* rt, uint32_t len);
+bool rollback_add_dynamic(const char* row_id, span_resolver_t fn, void* ctx, uint32_t max_len);
+void rollback_pre();
+void rollback_post();
+void rollback_report();                          // install summary
+int  rollback_span_count();
+
+// ---------------------------------------------------------------- rows.cpp
+// A row = one ledger row's mitigation. install() runs once on the init thread after the
+// signature scan; pre()/post() run around every invocation while the row is enabled.
+struct Row {
+    const char* id;              // ledger row ID, also the [rows] ini key
+    const char* summary;
+    int         default_on;
+    bool (*install)();           // returns false = row stays off (logged)
+    void (*pre)();               // optional
+    void (*post)();              // optional
+    int         on;              // resolved: ini toggle && install ok
+};
+extern Row row_MAG008;                           // rows/MAG-008.cpp
+extern Row row_MAG006;                           // rows/MAG-006.cpp
+extern Row row_W2A002;                           // rows/W2A-002.cpp
+extern Row row_CLK002;                           // rows/CLK-002.cpp
+extern Row row_MAG009;                           // rows/MAG-009.cpp
+extern Row row_LOOP004;                          // rows/LOOP-004.cpp
+extern Row row_LOOP005;                          // rows/LOOP-005.cpp
+extern Row row_MAG018;                           // rows/MAG-018.cpp
+extern Row row_MAG017;                           // rows/MAG-017.cpp
+extern Row row_MAG016;                           // rows/MAG-016.cpp
+extern Row row_MAG019;                           // rows/MAG-019.cpp
+extern Row row_MAG020;                           // rows/MAG-020.cpp
+extern Row row_MAG021;                           // rows/MAG-021.cpp
+extern Row row_MAG022;                           // rows/MAG-022.cpp
+extern Row row_MAG023;                           // rows/MAG-023.cpp (motion/throw script, 118 DLLs)
+extern Row row_MAG024;                           // rows/MAG-024.cpp (thrown-item arc node, 5 DLLs)
+extern Row row_UI001;                            // rows/UI-001.cpp
+extern Row row_UI017;                           // rows/UI-017.cpp (pad latch per logic tick, K4)
+extern Row row_UISPH001;                        // rows/UI-SPH-001.cpp (Sphere Grid update per logic tick)
+extern Row row_DEVTURBO;                        // rows/DEV-TURBO.cpp (test tool: hold a key to fast-forward)
+extern Row row_UIBTLL1;                         // rows/UI-BTLL1.cpp (battle L1 party swap presses kept)
+extern Row row_UI014;                           // rows/UI-014.cpp (minimap arrow pulse per logic tick)
+extern Row row_UISPH002;                        // rows/UI-SPH-002.cpp (Sphere Grid particles paused on render-only)
+uint8_t* mag006_entry();                        // Ppp_ProgramStep entry (null if MAG-006 is off)
+bool     mag006_pause_exe_caller(uint8_t* ret); // MAG-006 pauses this EXE call site like a DLL caller
+extern Row row_FX010;                            // rows/FX-010.cpp
+extern Row row_DIAG_BTLSIG;                      // rows/DIAG-BTLSIG.cpp (diagnostic, default off)
+extern Row row_DIAG_HANGDUMP;                    // rows/DIAG-HANGDUMP.cpp (diagnostic, observe only)
+extern Row row_DIAG_TEXTDUMP;                    // rows/DIAG-TEXTDUMP.cpp (diagnostic, default off)
+extern Row row_DIAG_DRAWSTEP;                    // rows/DIAG-DRAWSTEP.cpp (diagnostic, default off)
+extern Row row_SMOOTH001;                        // rows/SMOOTH-001.cpp (60 Hz camera; master [rows] SMOOTH=0)
+extern Row row_SMOOTH002;                        // rows/SMOOTH-002.cpp (60 Hz actor roots; master [rows] SMOOTH=0)
+extern Row row_SMOOTH003;                        // rows/SMOOTH-003.cpp (60 Hz limbs; master [rows] SMOOTH=1, row default 1)
+// Shared between rows
+extern void (*g_mag008_build_hook)();            // MAG-008: called where the exec==0 dispatch is skipped
+void* mag008_dispatch();                         // MAG-008: MsBattleScene_DrawDispatch (null if not installed)
+const char* mag021_state();                     // MAG-021: window state, for the crash line
+bool  mag021_in_window(const void* base);        // MAG-021: module replayed in the current window
+int   famE_find_setter(uint8_t* mod, uint32_t size, uint8_t** hit); // MAG-018: family-E exec-pause setter count
+void rows_install_all();
+bool row_on(const char* id);                     // false = that row is turned off (rollback skips its spans)
+void rows_pre();
+void rows_post();
+int        rows_count();
+const Row* row_at(int i);
+
+// ---------------------------------------------------------------- capture.cpp (TRIAGE E0)
+// FRAMEDIFF's capture inside fps60, observe only ([capture] in fps60.ini, default off). hooks.cpp
+// calls capture_point() at five points per invocation (see the order below and capture.cpp):
+//   fp_pre:  PRE_OUTER, pacing_pre, PRE_PACED, rollback_pre, rows_pre, PRE_INNER
+//   fp_post: POST_INNER, rows_post, rollback_post, pacing_post, POST_OUTER
+// boundary=outer diffs PRE_OUTER..POST_OUTER, boundary=inner diffs PRE_INNER..POST_INNER.
+enum CapPoint { CAP_PRE_OUTER = 0, CAP_PRE_PACED = 1, CAP_PRE_INNER = 2, CAP_POST_INNER = 3, CAP_POST_OUTER = 4 };
+void capture_init();                             // init thread; enabled=0 -> nothing allocated or registered
+void capture_point(int point);                   // no-op unless enabled
+void capture_divider_event(uint32_t req, bool swallowed); // divider hook, after pacing decided
+void capture_on_fault(const char* where, DWORD code);     // disables the capture only
+void capture_abort(const char* why);             // fps60 itself faulted
+
+// ---------------------------------------------------------------- diag.cpp (re/ledger/HANG-SPELLLOAD.md)
+// DIAG-HANGDUMP breadcrumbs. Game thread: one where-word, plain stores, read by the watchdog:
+//   bits 0..7 phase (W_*), bits 8..15 row index (rows.cpp table, 0xFF = none), bits 16..23 sub-step of a row.
+enum WherePhase { W_BETWEEN = 0, W_PRE = 1, W_PACING_PRE = 2, W_ROLLBACK_PRE = 3, W_ROW_PRE = 4, W_MAINLOOP = 5,
+                  W_ROW_POST = 6, W_ROLLBACK_POST = 7, W_PACING_POST = 8 };
+extern volatile LONG g_where;
+inline void where_set(int phase, int row) { g_where = (LONG)(phase | (row << 8)); }
+inline void where_sub(int sub) { g_where = (LONG)((g_where & 0xFFFF) | (sub << 16)); }  // inside Sg_MainLoop
+void where_text(LONG w, char* out, size_t cap);
+// Loader callbacks (any thread, under the loader lock): which row's callback, which step, which module.
+void ldr_enter(const char* row, ULONG reason, const void* base);
+void ldr_step(int step);
+void ldr_leave();
+void ldr_text(char* out, size_t cap);
+DWORD log_cs_owner();                            // log.cpp: thread id holding the log CS, 0 if free
+bool  log_line_try(const char* fmt, ...);        // log.cpp: like log_line, but gives up if the log CS is held
+void* proxy_real_minidump();                     // proxy.cpp: the System32 MiniDumpWriteDump (resolved once)
+
+// ---------------------------------------------------------------- safe memory helpers (sigs.cpp)
+bool  safe_read_u32(const void* p, uint32_t* out);
+bool  safe_copy(void* dst, const void* src, size_t n);
+// ---------------------------------------------------------------- entry hooks (entry_hook.cpp, MinHook)
+bool  hook_init();                                // once, before the first hook_entry (init thread)
+bool  hook_entry(const char* name, void* target, void* detour, void** orig);  // create + enable; logs failures
+bool  hook_remove(const char* name, void* target);  // disable + free the trampoline (module unload)
+// ---------------------------------------------------------------- magic overlay loads (magic_mods.cpp)
+// Callbacks run under the loader lock, for magic_*.dll only. At unload the image is still mapped.
+typedef void (*magic_load_fn)(uint8_t* base, uint32_t size, const char* name);
+typedef void (*magic_unload_fn)(uint8_t* base);
+bool  magic_mods_subscribe(const char* row, magic_load_fn on_load, magic_unload_fn on_unload);  // init thread
+void* exec_alloc(size_t n);
+void  on_fault(const char* where, DWORD code);   // disables everything, logs once

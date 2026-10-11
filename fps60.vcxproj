@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{5C3EB4E3-B7CB-41D4-A2C7-0BFAA6740311}</ProjectGuid>
+    <RootNamespace>FrameDiff</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>fps60</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <!-- Diagnostic drop-in: ships as dbghelp.dll next to FFX.exe (FFX.exe's only dbghelp import is MiniDumpWriteDump). -->
+    <TargetName>dbghelp</TargetName>
+    <OutDir>$(MSBuildThisFileDirectory)artifacts\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ModuleDefinitionFile>src\fps60.def</ModuleDefinitionFile>
+      <AdditionalDependencies>kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ModuleDefinitionFile>src\fps60.def</ModuleDefinitionFile>
+      <AdditionalDependencies>kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\proxy.cpp" />
+    <ClCompile Include="src\log.cpp" />
+    <ClCompile Include="src\config.cpp" />
+    <ClCompile Include="src\sigs.cpp" />
+    <ClCompile Include="src\hooks.cpp" />
+    <ClCompile Include="src\pacing.cpp" />
+    <ClCompile Include="src\rollback.cpp" />
+    <ClCompile Include="src\rows.cpp" />
+    <ClCompile Include="src\capture.cpp" />
+    <ClCompile Include="src\capture_config.cpp" />
+    <ClCompile Include="src\rows\MAG-008.cpp" />
+    <ClCompile Include="src\rows\MAG-006.cpp" />
+    <ClCompile Include="src\rows\ppp_pause.cpp" />
+    <ClCompile Include="src\rows\W2A-002.cpp" />
+    <ClCompile Include="src\rows\CLK-002.cpp" />
+    <ClCompile Include="src\rows\MAG-009.cpp" />
+    <ClCompile Include="src\rows\MAG-016.cpp" />
+    <ClCompile Include="src\rows\LOOP-005.cpp" />
+    <ClCompile Include="src\rows\LOOP-004.cpp" />
+    <ClCompile Include="src\rows\MAG-017.cpp" />
+    <ClCompile Include="src\rows\MAG-018.cpp" />
+    <ClCompile Include="src\rows\MAG-019.cpp" />
+    <ClCompile Include="src\rows\MAG-020.cpp" />
+    <ClCompile Include="src\rows\MAG-021.cpp" />
+    <ClCompile Include="src\rows\MAG-022.cpp" />
+    <ClCompile Include="src\rows\MAG-023.cpp" />
+    <ClCompile Include="src\rows\MAG-024.cpp" />
+    <ClCompile Include="src\rows\UI-001.cpp" />
+    <ClCompile Include="src\rows\UI-017.cpp" />
+    <ClCompile Include="src\rows\UI-SPH-001.cpp" />
+    <ClCompile Include="src\rows\UI-SPH-002.cpp" />
+    <ClCompile Include="src\rows\UI-014.cpp" />
+    <ClCompile Include="src\rows\UI-BTLL1.cpp" />
+    <ClCompile Include="src\rows\DEV-TURBO.cpp" />
+    <ClCompile Include="src\rows\FX-010.cpp" />
+    <ClCompile Include="src\rows\DIAG-HANGDUMP.cpp" />
+    <ClCompile Include="src\rows\DIAG-BTLSIG.cpp" />
+    <ClCompile Include="src\rows\DIAG-DRAWSTEP.cpp" />
+    <ClCompile Include="src\rows\DIAG-TEXTDUMP.cpp" />
+    <ClCompile Include="src\diag.cpp" />
+    <ClCompile Include="src\rows\smooth_common.cpp" />
+    <ClCompile Include="src\rows\SMOOTH-001.cpp" />
+    <ClCompile Include="src\rows\SMOOTH-002.cpp" />
+    <ClCompile Include="src\rows\SMOOTH-003.cpp" />
+    <ClCompile Include="src\forwards.cpp" />
+    <ClCompile Include="src\entry_hook.cpp" />
+    <ClCompile Include="src\magic_mods.cpp" />
+    <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+    <ClCompile Include="third_party\minhook\src\hook.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+    <ClCompile Include="third_party\minhook\src\trampoline.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+    <ClCompile Include="third_party\minhook\src\hde\hde32.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\fps60.h" />
+    <ClInclude Include="src\capture.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src\fps60.def" />
+    <None Include="fps60.ini" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>
