@@ -6,12 +6,16 @@
 // counters (chr +0x65C) are held high so the party always acts next. Ctrl+LAB-001-OFFKEY disarms and restores the flags.
 // Keys default to numpad 1 / numpad 3 (F5 is the game's hide-HUD key).
 // Logs: cast id/name/caster/targets/anim DLLs, magic_*.dll load/unload with logic ticks since the cast.
-// Names: optional <game>\fps60_lab.txt, lines "<hex id> <name>" (tools/lab/lab_list.py).
+// Names: optional <game>\fps60_lab.txt, lines "<hex id> <name> <state>" (tools/lab/lab_list.py).
+// List mode (LAB-001-CMD=0): the key toggles a loop that casts the next "run" command of fps60_lab.txt at each party
+// turn. fps60_lab_progress.txt (append only) gets "S <id> <name>" at each submit and "D <id>" when the next party turn
+// comes; arming resumes after the last S, and an S without its D (crash or quit mid-cast) is logged.
 // Details: re/ledger/LAB.md
 #include "../fps60.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 typedef int (__cdecl* submit_t)(uint8_t* cue, uint32_t p2, int type);   // FUN_00792d60, plain RET
 typedef void(__cdecl* menu_t)(uint32_t chr);                            // FUN_0089bb10, plain RET
@@ -34,10 +38,53 @@ static volatile LONG g_cast_tick = -1;           // g_tick at the last cast, -1 
 static int      g_last_cmd = 0;
 
 static char g_names[0x400][32];                  // index id - 0x3000
+static uint16_t g_list[0x400];                   // list mode: "run" ids in file order
+static int      g_list_n = 0, g_list_pos = 0;
+static bool     g_list_mode = false;
+static bool     g_done_due = false;              // list mode: write "D" at the next party turn
 
 static const char* cmd_name(int id) {
     int i = id - 0x3000;
     return (i >= 0 && i < 0x400 && g_names[i][0]) ? g_names[i] : "?";
+}
+
+static FILE* progress_open(const wchar_t* mode) {
+    wchar_t p[MAX_PATH];
+    game_dir(p, MAX_PATH);
+    wcscat_s(p, L"fps60_lab_progress.txt");
+    FILE* f = nullptr;
+    return (_wfopen_s(&f, p, mode) || !f) ? nullptr : f;
+}
+
+static void progress(const char* fmt, ...) {
+    FILE* f = progress_open(L"a");
+    if (!f) return;
+    va_list a;
+    va_start(a, fmt);
+    vfprintf(f, fmt, a);
+    va_end(a);
+    fclose(f);
+}
+
+// Arming in list mode: continue after the last started command.
+static void resume() {
+    int last = -1;
+    bool done = true;
+    if (FILE* f = progress_open(L"r")) {
+        char line[96];
+        while (fgets(line, sizeof(line), f)) {
+            int id = (int)strtol(line + 1, nullptr, 16);
+            if (line[0] == 'S') { last = id; done = false; }
+            else if (line[0] == 'D' && id == last) done = true;
+        }
+        fclose(f);
+    }
+    g_list_pos = 0;
+    if (last >= 0) {
+        for (int i = 0; i < g_list_n; i++) if (g_list[i] == last) { g_list_pos = i + 1; break; }
+        if (!done) log_line("LAB-001: the last run stopped during 0x%04X %s (no D line: crash or quit mid-cast)", last, cmd_name(last));
+    }
+    log_line("LAB-001: list mode, %d commands, resuming at #%d", g_list_n, g_list_pos);
 }
 
 static uint8_t* chr(uint32_t id) { return (id < 0x1F && *g_chr_tab) ? *g_chr_tab + id * 0xF90 : nullptr; }
@@ -76,8 +123,18 @@ static uint32_t pick_targets(uint32_t caster, uint8_t ft) {
 
 // Replaces CALL FUN_0089bb10(chr) at 0x792CF3: the party member's turn would open the battle menu.
 static void __cdecl h_menu(uint32_t id) {
+    if (g_done_due && id < 0x12) { progress("D %04X\n", g_last_cmd); g_done_due = false; }
     if (!g_disabled && g_armed && g_queued > 0 && id < 0x12) {
         __try {
+            if (g_list_mode) {
+                uint8_t* r = nullptr;
+                while (g_list_pos < g_list_n && !(r = cmd_record(g_list[g_list_pos]))) {
+                    log_line("LAB-001: no record for 0x%04X - skipped", g_list[g_list_pos]);
+                    g_list_pos++;
+                }
+                if (!r) { log_line("LAB-001: list done"); g_queued = 0; g_menu(id); return; }
+                g_cmd = g_list[g_list_pos++];
+            }
             uint8_t* rec = cmd_record(g_cmd);
             uint8_t* c = chr(id);
             if (rec && c) {
@@ -91,13 +148,15 @@ static void __cdecl h_menu(uint32_t id) {
                 *(uint32_t*)(cue + 0x18) = 0x00FF00FF;          // unused entries as FUN_0089afc0 leaves them
                 *(uint32_t*)(cue + 0x28) = 0x00FF00FF;
                 *(uint32_t*)(cue + 0x38) = 0x00FF00FF;
-                InterlockedDecrement(&g_queued);
+                if (!g_list_mode) InterlockedDecrement(&g_queued);
+                else { progress("S %04X %s\n", g_cmd, cmd_name(g_cmd)); g_done_due = true; }
                 g_cast_tick = g_tick;
                 g_last_cmd = g_cmd;
                 g_last_tg = tg;
                 g_pending = 1;
-                log_line("LAB-001: cast 0x%04X %s by chr %u -> targets 0x%08X (flags_target 0x%02X, anim 0x%04X/0x%04X, "
-                         "caster hp %d mp %d, first target hp %d) tick %ld", g_cmd, cmd_name(g_cmd), id, tg, rec[0x1A],
+                log_line("LAB-001: cast%s 0x%04X %s by chr %u -> targets 0x%08X (flags_target 0x%02X, owner 0x%02X, "
+                         "anim 0x%04X/0x%04X, caster hp %d mp %d, first target hp %d) tick %ld", g_list_mode ? " (list)" : "",
+                         g_cmd, cmd_name(g_cmd), id, tg, rec[0x1A], rec[0x19],
                          *(uint16_t*)(rec + 0x10), *(uint16_t*)(rec + 0x12), *(int*)(c + 0x5D0), *(int*)(c + 0x5D4),
                          target_hp(tg), g_tick);
                 int r = g_submit(cue, 0, 0);
@@ -142,14 +201,16 @@ static void load_names() {
         int i = (int)id - 0x3000;
         if (e == line || i < 0 || i >= 0x400) continue;
         while (*e == ' ' || *e == '\t') e++;
-        size_t k = strcspn(e, "\r\n");
-        if (k > 31) k = 31;
-        memcpy(g_names[i], e, k);
-        g_names[i][k] = 0;
+        size_t k = strcspn(e, " \t\r\n"), c = k > 31 ? 31 : k;
+        memcpy(g_names[i], e, c);
+        g_names[i][c] = 0;
+        e += k;
+        while (*e == ' ' || *e == '\t') e++;
+        if (!strncmp(e, "run", 3) && g_list_n < 0x400) g_list[g_list_n++] = (uint16_t)id;
         n++;
     }
     fclose(f);
-    log_line("  LAB-001: %d command names from fps60_lab.txt", n);
+    log_line("  LAB-001: %d command names from fps60_lab.txt, %d marked run", n, g_list_n);
 }
 
 static bool install() {
@@ -175,6 +236,7 @@ static bool install() {
     g_submit = (submit_t)submit;
     g_menu = (menu_t)call_target(site);
     g_cmd = config_row("LAB-001-CMD", 0x3000);
+    g_list_mode = g_cmd == 0;
     g_key = config_row("LAB-001-KEY", VK_NUMPAD1);
     g_offkey = config_row("LAB-001-OFFKEY", VK_NUMPAD3);
     load_names();
@@ -211,6 +273,13 @@ static void pre() {
                     g_tick = 0;
                     g_cast_tick = -1;
                     log_line("LAB-001: armed (debug flags were %u/%u/%u)", f[0], f[1], f[9]);
+                    if (g_list_mode) resume();
+                }
+                if (g_list_mode) {
+                    g_queued = g_queued ? 0 : 1;
+                    log_line("LAB-001: list loop %s at #%d of %d", g_queued ? "on" : "paused", g_list_pos, g_list_n);
+                    g_key_down = down;
+                    return;
                 }
                 InterlockedIncrement(&g_queued);
                 log_line("LAB-001: cast 0x%04X %s queued (%ld waiting), battle state %u, input queue %u (head chr %u, menu %u)",
