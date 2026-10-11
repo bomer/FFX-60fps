@@ -16,7 +16,7 @@ static void __cdecl h_walk(uint8_t* head) {
         for (uint8_t* nd = head; nd && guard < 4096; nd = *(uint8_t**)(nd + 8), guard++) {
             uint32_t* u = (uint32_t*)nd;
             node_fn_t cb = (node_fn_t)(uintptr_t)u[0x2C];
-            if (cb && !(u[0] & 4)) cb(nd);
+            if (cb && !(u[0] & 4)) mag026_draw_record(head, nd, (void*)cb);   // MAG-026 off: plain cb(nd)
         }
         InterlockedIncrement(&g_draw_only);
         return;
