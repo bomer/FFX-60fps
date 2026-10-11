@@ -132,6 +132,7 @@ extern Row row_MAG021;                           // rows/MAG-021.cpp
 extern Row row_MAG022;                           // rows/MAG-022.cpp
 extern Row row_MAG023;                           // rows/MAG-023.cpp (motion/throw script, 118 DLLs)
 extern Row row_MAG024;                           // rows/MAG-024.cpp (thrown-item arc node, 5 DLLs)
+extern Row row_MAG025;                           // rows/MAG-025.cpp (DLL-called effect-unit walks, draw only on render-only)
 extern Row row_UI001;                            // rows/UI-001.cpp
 extern Row row_UI017;                           // rows/UI-017.cpp (pad latch per logic tick, K4)
 extern Row row_UISPH001;                        // rows/UI-SPH-001.cpp (Sphere Grid update per logic tick)

@@ -111,6 +111,7 @@
     <ClCompile Include="src\rows\MAG-022.cpp" />
     <ClCompile Include="src\rows\MAG-023.cpp" />
     <ClCompile Include="src\rows\MAG-024.cpp" />
+    <ClCompile Include="src\rows\MAG-025.cpp" />
     <ClCompile Include="src\rows\UI-001.cpp" />
     <ClCompile Include="src\rows\UI-017.cpp" />
     <ClCompile Include="src\rows\TEXANIM-001.cpp" />
