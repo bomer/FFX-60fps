@@ -3,6 +3,7 @@
 // one key per ledger row mitigation (ROW_ID=1 on, 0 off; missing = the row's default).
 #include "fps60.h"
 #include <stdlib.h>
+#include <string.h>
 
 Config g_cfg;
 
@@ -41,6 +42,16 @@ void config_load() {
     if (c.unpack_timeout_s < 5) c.unpack_timeout_s = 5;
 }
 
+void config_str(const char* sect, const char* key, char* buf, int n, const char* def) {
+    GetPrivateProfileStringA(sect, key, def, buf, n, g_ini);
+}
+
 int config_row(const char* row_id, int def) {
+    // user-facing switches in [fps60] that stand for a row: soft_reset=<buttons>|0|off (SR-003)
+    if (!strcmp(row_id, "SR-003")) {
+        char b[96];
+        GetPrivateProfileStringA("fps60", "soft_reset", "", b, sizeof(b), g_ini);
+        if (b[0]) return !(strcmp(b, "0") == 0 || _stricmp(b, "off") == 0);
+    }
     return (int)ini_int("rows", row_id, def);
 }
