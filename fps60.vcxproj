@@ -115,6 +115,7 @@
     <ClCompile Include="src\rows\UI-017.cpp" />
     <ClCompile Include="src\rows\TEXANIM-001.cpp" />
     <ClCompile Include="src\rows\SR-003.cpp" />
+    <ClCompile Include="src\rows\DIAG-DYNGEO.cpp" />
     <ClCompile Include="src\rows\UI-SPH-001.cpp" />
     <ClCompile Include="src\rows\UI-SPH-002.cpp" />
     <ClCompile Include="src\rows\UI-014.cpp" />

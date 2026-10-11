@@ -37,6 +37,7 @@ static Row* g_rows[] = {
     &row_DIAG_DRAWSTEP,
     &row_DIAG_TEXTDUMP,
     &row_DIAG_HANGDUMP,
+    &row_DIAG_DYNGEO,
     &row_SMOOTH001,                              // after LOOP-004/LOOP-005 (install reads row_on)
     &row_SMOOTH002,
     &row_SMOOTH003,
