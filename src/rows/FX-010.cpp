@@ -540,7 +540,7 @@ static bool install() {
         0x7122F0);
     if (!g_entry) return false;
     if (!ppp_resolve_pause("FX-010", g_entry + 0x72)) return false;
-    if (config_row("FX-010-SPAWN", 0)) {
+    if (config_row("FX-010-SPAWN", 1)) {
         if (!ppp_hook_spawn_call("FX-010", g_entry + 0x2A)) return false;
     } else {
         log_line("  FX-010: spawn skip OFF (FX-010-SPAWN=0)");

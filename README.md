@@ -19,8 +19,10 @@ To uninstall, delete `dbghelp.dll`.
 
 ## Settings
 
-`fps60.ini` is read when the game starts. Each fix has its own on/off switch under `[rows]`, with a comment
-saying what it does.
+`fps60.ini` is read when the game starts. The release copy lists only the settings players may want to change;
+everything else uses its built-in default. The full list of switches (one per fix under `[rows]`, plus test and
+diagnostic switches) is the development copy, `fps60.ini` in the source tree. `ship/fps60.ini` is the release copy;
+`tools/pack_dist.py` (outer repo) packs it and checks that every value in it equals the built-in default.
 
 | Key | Action |
 |---|---|
