@@ -40,6 +40,7 @@ static int      g_last_cmd = 0;
 static int      g_mot_n = 0;                     // LAB-001-MOTCLK: invocations to log after each cast (0 = off)
 static int      g_mot_left = 0;
 static uint8_t* g_mot_actor = nullptr;           // caster's actor (battle chr +0, Fahrenheit Chr.actor)
+bool lab001_mot_window() { return g_mot_left > 0; }   // other rows' per-cast diagnostics follow this window
 static char g_names[0x400][32];                  // index id - 0x3000
 static uint16_t g_list[0x400];                   // list mode: "run" ids in file order
 static int      g_list_n = 0, g_list_pos = 0;
