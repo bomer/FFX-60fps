@@ -407,7 +407,7 @@ static void rb_restore() {
     g_rb_n = 0;
 }
 
-// FX-010-EXTRAP (default 0, test): paused render-only frames drew particles at their tick state, so field effects
+// FX-010-EXTRAP (default 1 since 12/10/2026): paused render-only frames drew particles at their tick state, so field effects
 // moved at 30 Hz next to 60 Hz characters (U 12/10/2026: boat splash in Kilika, smooth but 2x with FX-010 off).
 // After every unpaused step each particle record is snapshotted (size = group def +0x20 + op count * 4, from the
 // spawn FUN_00716770; age at +0xC, list link at +0). Before a paused step, every 4-byte word that changed between
@@ -839,7 +839,7 @@ static bool install() {
     g_diag_ops = config_row("DIAG-FX010-OPS", 0) != 0;
     g_diag_writes = config_row("DIAG-FX010-WRITES", 0) != 0;
     g_rollback = config_row("FX-010-ROLLBACK", 0) != 0;
-    g_extrap = config_row("FX-010-EXTRAP", 0);
+    g_extrap = config_row("FX-010-EXTRAP", 1);
     g_extrap_pct = config_row("FX-010-EXTRAP-PCT", 50);
     g_ex_diag = config_row("FX-010-EXTRAP-DIAG", 0);
     g_ex_unit = config_row("FX-010-EXTRAP-UNIT", 1);
@@ -1049,5 +1049,5 @@ static void post() {
 Row row_FX010 = {
     "FX-010",
     "field/map particle programs (FUN_007122f0): pause flag on render-only invocations (draw still runs)",
-    0, install, pre, post, 0
+    1, install, pre, post, 0
 };
