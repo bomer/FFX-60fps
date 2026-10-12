@@ -407,6 +407,107 @@ static void rb_restore() {
     g_rb_n = 0;
 }
 
+// FX-010-EXTRAP (default 0, test): paused render-only frames drew particles at their tick state, so field effects
+// moved at 30 Hz next to 60 Hz characters (U 12/10/2026: boat splash in Kilika, smooth but 2x with FX-010 off).
+// After every unpaused step each particle record is snapshotted (size = group def +0x20 + op count * 4, from the
+// spawn FUN_00716770; age at +0xC, list link at +0). Before a paused step, every 4-byte word that changed between
+// the last two snapshots of the same particle (age grew) and holds a float in a sane range in both is moved half a
+// tick ahead (cur + k * (cur - prev)); words that changed sign are held, a result that would cross zero is clamped
+// to 0 (fades, colours). The paused
+// step draws from that, then the words are put back. F3 toggles it in game.
+static int  g_extrap = 0, g_extrap_pct = 50;
+static LONG g_fx_n = 1;                          // unpaused (logic) invocations; main thread only
+static LONG g_ex_parts = 0, g_ex_words = 0, g_ex_lines = 0;
+struct PSnap { uint8_t* p; uint32_t len; LONG ncur, nprev; uint8_t* cur; uint8_t* prev; };
+enum { PS_N = 4096, EX_MAXW = 1 << 16 };
+static PSnap* g_psnap = nullptr;
+static uint32_t g_ex_off[EX_MAXW];               // touched words (record pointer + offset) for the restore
+static uint8_t* g_ex_rec[EX_MAXW];
+static uint32_t g_ex_val[EX_MAXW];
+static int g_ex_nw = 0;
+
+static PSnap* psnap_find(uint8_t* p, bool create) {
+    uint32_t h = (uint32_t)(((uintptr_t)p >> 4) * 2654435761u) % PS_N;
+    PSnap* stale = nullptr;
+    for (int i = 0; i < 32; i++) {
+        PSnap* e = &g_psnap[(h + i) % PS_N];
+        if (e->p == p) return e;
+        if (!stale && (!e->p || e->ncur < g_fx_n - 2)) stale = e;
+    }
+    if (!create || !stale) return nullptr;
+    stale->p = p; stale->ncur = stale->nprev = 0;
+    return stale;
+}
+
+template <class F> static void for_particles(uint8_t* prog, F fn) {
+    int ng = *(int*)(prog + 0x18);
+    uint8_t* groups = *(uint8_t**)(prog + 0x3C);
+    for (int g = 0; g < ng && g < 64 && groups; g++) {
+        uint8_t* grp = groups + g * 0x10;
+        uint8_t* def = *(uint8_t**)grp;
+        if (!def) continue;
+        uint32_t len = (uint32_t)*(int*)(def + 0x20) + (uint32_t)*(int16_t*)(def + 0x26) * 4;
+        if (len < 0x10 || len > 0x2000) continue;
+        uint8_t* part = *(uint8_t**)(grp + 4);
+        int cnt = *(uint16_t*)(grp + 0xC);
+        for (int k = 0; k < cnt && k < 4096 && part; k++) { fn(part, len & ~3u); part = *(uint8_t**)part; }
+    }
+}
+
+static void ex_snapshot(uint8_t* prog) {
+    __try {
+        for_particles(prog, [&](uint8_t* part, uint32_t len) {
+            PSnap* e = psnap_find(part, true);
+            if (!e) return;
+            if (e->len != len) {
+                free(e->cur); free(e->prev);
+                e->cur = (uint8_t*)malloc(len); e->prev = (uint8_t*)malloc(len);
+                e->len = (e->cur && e->prev) ? len : 0; e->ncur = e->nprev = 0;
+                if (!e->len) return;
+            }
+            uint8_t* t = e->prev; e->prev = e->cur; e->cur = t;
+            e->nprev = e->ncur;
+            memcpy(e->cur, part, len);
+            e->ncur = g_fx_n;
+        });
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static bool floatish(float x) { float a = x < 0 ? -x : x; return x == 0.0f || (a >= 1e-4f && a <= 1e6f); }
+
+static void ex_apply(uint8_t* prog) {
+    g_ex_nw = 0;
+    float k = g_extrap_pct / 100.0f;
+    __try {
+        for_particles(prog, [&](uint8_t* part, uint32_t len) {
+            PSnap* e = psnap_find(part, false);
+            if (!e || e->len != len || e->ncur != g_fx_n || e->nprev != g_fx_n - 1) return;
+            int32_t ac = *(int32_t*)(e->cur + 0xC), ap = *(int32_t*)(e->prev + 0xC);
+            if (ac <= ap || *(int32_t*)(part + 0xC) != ac) return;     // respawned, restarted or already changed
+            bool any = false;
+            for (uint32_t o = 0x10; o < len && g_ex_nw < EX_MAXW; o += 4) {
+                float a = *(float*)(e->prev + o), b = *(float*)(e->cur + o);
+                if (*(uint32_t*)(e->prev + o) == *(uint32_t*)(e->cur + o) || !floatish(a) || !floatish(b)) continue;
+                if (*(uint32_t*)(part + o) != *(uint32_t*)(e->cur + o)) continue;
+                if ((a < 0) != (b < 0)) continue;                    // sign flip (angle wrap, zero crossing): hold
+                float x = b + k * (b - a);
+                if (b == 0.0f || (x < 0) != (b < 0)) x = 0.0f;
+                g_ex_rec[g_ex_nw] = part; g_ex_off[g_ex_nw] = o; g_ex_val[g_ex_nw] = *(uint32_t*)(e->cur + o); g_ex_nw++;
+                *(float*)(part + o) = x;
+                any = true;
+            }
+            if (any) InterlockedIncrement(&g_ex_parts);
+        });
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    g_ex_words += g_ex_nw;
+}
+
+static void ex_restore() {
+    __try { for (int i = 0; i < g_ex_nw; i++) *(uint32_t*)(g_ex_rec[i] + g_ex_off[i]) = g_ex_val[i]; }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    g_ex_nw = 0;
+}
+
 static int __cdecl h_fp_step(void* prog, uint32_t flags) {
     if (row_FX010.on && !g_disabled && pacing_kind() == INV_BUILD && prog_selected(prog)) {
         if (*(int32_t*)((uint8_t*)prog + 8) == 0 && *(int32_t*)((uint8_t*)prog + 0xC) == 0) {
@@ -417,7 +518,9 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         if (g_diag_submit) diag_step_begin(2);
         if (g_diag_writes) { wr_snapshot((uint8_t*)prog); g_ph_active = 1; }
         if (g_rollback) rb_save((uint8_t*)prog);
+        if (g_extrap && g_psnap) ex_apply((uint8_t*)prog);
         int r = ppp_step_paused(g_tramp, prog, flags);
+        if (g_ex_nw) ex_restore();
         g_ph_active = 0;
         if (g_diag_writes) wr_diff(2);
         if (g_rollback) rb_restore();
@@ -444,6 +547,7 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
     int r = g_tramp(prog, flags);
     g_defer_prog = nullptr;
     if (r && g_deferred_n) deferred_flush(prog, true);       // program ended: the field loop frees it now
+    if (!r && g_psnap && row_FX010.on && pacing_kind() != INV_BUILD) ex_snapshot((uint8_t*)prog);
     if (g_diag_submit) diag_step_end(prog, 1);
     return r;
 }
@@ -642,6 +746,10 @@ static bool install() {
     g_diag_ops = config_row("DIAG-FX010-OPS", 0) != 0;
     g_diag_writes = config_row("DIAG-FX010-WRITES", 0) != 0;
     g_rollback = config_row("FX-010-ROLLBACK", 0) != 0;
+    g_extrap = config_row("FX-010-EXTRAP", 0);
+    g_extrap_pct = config_row("FX-010-EXTRAP-PCT", 50);
+    g_psnap = (PSnap*)calloc(PS_N, sizeof(PSnap));
+    log_line("  FX-010-EXTRAP: %s (%d%% of a tick, F3 toggles)", g_extrap ? "on" : "off", g_extrap_pct);
     if (g_rollback) log_line("  FX-010: FX-010-ROLLBACK on: paused steps of selected programs leave their records unchanged");
     g_loopdefer = config_row("FX-010-LOOPDEFER", 1) != 0;
     if (g_loopdefer) {
@@ -693,7 +801,27 @@ static bool install() {
     return true;
 }
 
+static void ex_hotkey() {
+    static bool prev = false;
+    bool down = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
+    bool edge = down && !prev;
+    prev = down;
+    if (!edge || !g_psnap) return;
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid != GetCurrentProcessId()) return;
+    g_extrap = !g_extrap;
+    log_line("F3: FX-010-EXTRAP=%d (particles moved %d%% of a tick ahead on paused frames)", g_extrap, g_extrap_pct);
+}
+
 static void pre() {
+    if (pacing_kind() != INV_BUILD) g_fx_n++;
+    ex_hotkey();
+    if (g_extrap && g_ex_parts - g_ex_lines >= 20000) {
+        g_ex_lines = g_ex_parts;
+        log_line("FX-010-EXTRAP: %ld particle draws extrapolated, %ld words", g_ex_parts, g_ex_words);
+    }
     if (g_patched) return;
     g_patched = true;
     if (!hook_entry("FX-010", g_entry, (void*)&h_fp_step, (void**)&g_tramp)) {
