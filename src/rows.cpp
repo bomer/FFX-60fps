@@ -26,6 +26,7 @@ static Row* g_rows[] = {
     &row_MAG025,
     &row_MAG026,
     &row_MAG027,
+    &row_DIAGFRAMETIME,
     &row_UI001,
     &row_UI017,
     &row_UISPH001,

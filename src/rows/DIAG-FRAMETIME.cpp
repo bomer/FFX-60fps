@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: Apache-2.0
+// DIAG-FRAMETIME (diagnostic, default off, observe only): frame-to-frame time at the start of each Sg_MainLoop
+// invocation under 60 Hz pacing (logic and render-only invocations; backlog and stock invocations reset the
+// chain). The host limiter SKS_WinMainLoop 0x62EE50 waits with Sleep() at a 5 ms timer resolution (re/MAINLOOP.md
+// section 2), which VRR displays show as uneven frames. Every DIAG-FRAMETIME-N frames: mean, standard deviation,
+// percentiles, min/max, and counts outside 16.68 ms +-1 / +-2 ms.
+#include "../fps60.h"
+#include <math.h>
+#include <string.h>
+
+enum { NB = 400 };                               // 0.125 ms buckets, 0..50 ms; last bucket = overflow
+static uint32_t g_hist[NB + 1];
+static uint32_t g_n = 0, g_win = 600;
+static double   g_sum = 0, g_sum2 = 0, g_min = 1e9, g_max = 0;
+static LARGE_INTEGER g_freq = {}, g_prev = {};
+
+static double pct(double p) {
+    uint32_t want = (uint32_t)(p * g_n), acc = 0;
+    for (int i = 0; i <= NB; i++) { acc += g_hist[i]; if (acc > want) return i * 0.125 + 0.0625; }
+    return NB * 0.125;
+}
+
+static void dump() {
+    double mean = g_sum / g_n, sd = sqrt(g_sum2 / g_n - mean * mean);
+    uint32_t off1 = 0, off2 = 0;
+    for (int i = 0; i <= NB; i++) {
+        double c = i * 0.125 + 0.0625, d = fabs(c - 16.683);
+        if (d > 1.0) off1 += g_hist[i];
+        if (d > 2.0) off2 += g_hist[i];
+    }
+    log_line("DIAG-FRAMETIME: %u frames: mean %.3f ms (%.2f fps), sd %.3f, min %.2f p1 %.2f p5 %.2f p50 %.2f p95 %.2f p99 %.2f "
+             "max %.2f; off 16.68 by >1 ms %u, >2 ms %u", g_n, mean, 1000.0 / mean, sd, g_min, pct(0.01), pct(0.05),
+             pct(0.5), pct(0.95), pct(0.99), g_max, off1, off2);
+    memset(g_hist, 0, sizeof(g_hist));
+    g_n = 0; g_sum = g_sum2 = 0; g_min = 1e9; g_max = 0;
+}
+
+static void pre() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    int k = pacing_kind();
+    if (k != INV_LOGIC && k != INV_BUILD) { g_prev.QuadPart = 0; return; }
+    if (g_prev.QuadPart) {
+        double ms = (now.QuadPart - g_prev.QuadPart) * 1000.0 / g_freq.QuadPart;
+        int b = (int)(ms / 0.125);
+        g_hist[b < 0 ? 0 : b > NB ? NB : b]++;
+        g_n++; g_sum += ms; g_sum2 += ms * ms;
+        if (ms < g_min) g_min = ms;
+        if (ms > g_max) g_max = ms;
+        if (g_n >= g_win) dump();
+    }
+    g_prev = now;
+}
+
+static bool install() {
+    QueryPerformanceFrequency(&g_freq);
+    g_win = (uint32_t)config_row("DIAG-FRAMETIME-N", 600);
+    if (g_win < 60) g_win = 60;
+    log_line("  DIAG-FRAMETIME: frame times at Sg_MainLoop entry, summary every %u frames", g_win);
+    return true;
+}
+
+Row row_DIAGFRAMETIME = {
+    "DIAG-FRAMETIME",
+    "diagnostic: frame-to-frame time histogram under 60 Hz pacing (VRR pacing check); observe only",
+    0, install, pre, nullptr, 0
+};

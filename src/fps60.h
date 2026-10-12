@@ -135,6 +135,7 @@ extern Row row_MAG024;                           // rows/MAG-024.cpp (thrown-ite
 extern Row row_MAG025;                           // rows/MAG-025.cpp (DLL-called effect-unit walks, draw only on render-only)
 extern Row row_MAG026;                          // rows/MAG-026.cpp (family-X record draws held on render-only)
 extern Row row_MAG027;                           // rows/MAG-027.cpp (event timeline walker, 22 DLLs: starts on logic only)
+extern Row row_DIAGFRAMETIME;                    // rows/DIAG-FRAMETIME.cpp (frame time histogram, VRR check)
 void     mag026_draw_record(uint8_t* head, uint8_t* nd, void* cb); // MAG-020 draw-only walk -> MAG-026
 extern Row row_UI001;                            // rows/UI-001.cpp
 extern Row row_UI017;                           // rows/UI-017.cpp (pad latch per logic tick, K4)
