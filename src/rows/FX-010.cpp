@@ -667,5 +667,5 @@ static void post() {
 Row row_FX010 = {
     "FX-010",
     "field/map particle programs (FUN_007122f0): pause flag on render-only invocations (draw still runs)",
-    0, install, pre, post, 0
+    1, install, pre, post, 0
 };
