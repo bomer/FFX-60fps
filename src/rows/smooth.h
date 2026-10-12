@@ -21,7 +21,7 @@ struct SmoothStats {
 static const float SMOOTH_CUT_DIST = 500.0f;
 
 bool smooth_master();                    // [rows] SMOOTH (default 0)
-bool smooth_live();                      // runtime toggle (F7), true by default once installed
+bool smooth_live(int row = 0);           // runtime toggle (F7; Ctrl+F7 turns SMOOTH-00<row> alone off)
 void smooth_poll_hotkey();               // F7 edge; called from each SMOOTH row's pre()
 
 // Interpolation: out = a..b at t for a world transform (row-vector, translation in

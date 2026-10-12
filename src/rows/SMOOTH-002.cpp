@@ -145,7 +145,7 @@ static void apply_interp() {
 }
 
 static void __cdecl h_draw() {
-    if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live() &&
+    if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) &&
         (g_kind == INV_LOGIC || g_kind == INV_BACKLOG)) {
         g_applied_inv = true;
         g_lwindows++;
@@ -217,7 +217,7 @@ static void post() {
     if (g_diag && g_lwindows - last >= 600) {
         last = g_lwindows;
         log_line("SMOOTH-002: logic windows=%ld interp=%ld interp_cut=%ld warps=%ld skip(hist=%ld moved=%ld) | children=%ld actors=%d live=%d",
-                 g_lwindows, g_st.interp, g_st.interp_cut, g_warps, g_skip_hist, g_skip_moved, g_child, *g_count, smooth_live());
+                 g_lwindows, g_st.interp, g_st.interp_cut, g_warps, g_skip_hist, g_skip_moved, g_child, *g_count, smooth_live(2));
     }
     static LONG reported = 0;
     if (!reported && g_st.interp > 0) {

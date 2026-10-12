@@ -617,7 +617,7 @@ static void walk() {
 }
 
 static void __cdecl h_noskel() {
-    if (row_SMOOTH003.on && !g_disabled && g_kind == INV_BUILD && smooth_live() && *g_freeze == 0) {
+    if (row_SMOOTH003.on && !g_disabled && g_kind == INV_BUILD && smooth_live(3) && *g_freeze == 0) {
         g_walks++;
         where_sub(0x31);
         __try { walk(); }
@@ -805,7 +805,7 @@ static void __cdecl h_cjob(uint8_t** list, int* count) {
 // Test hotkey F5 (game window in front): cycle the job-hook modes 4 -> 3 -> 2 -> 0 (stock, cloth 2x) -> 4.
 static void cloth_hotkey() {
     static bool prev = false;
-    bool down = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
+    bool down = (GetAsyncKeyState(VK_F5) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000);   // Ctrl+F5 is DEV-STOCK
     bool edge = down && !prev;
     prev = down;
     if (!edge || !g_cjob_tramp) return;
@@ -839,7 +839,7 @@ static void pre() {
     }
     g_kind = g_disabled ? INV_STOCK : pacing_kind();
     if (g_kind != INV_BUILD) InterlockedIncrement(&g_step_n);
-    bool want = !g_disabled && smooth_live() && (g_kind == INV_LOGIC || g_kind == INV_BUILD);
+    bool want = !g_disabled && smooth_live(3) && (g_kind == INV_LOGIC || g_kind == INV_BUILD);
     *g_half = want ? 1 : 0;
     g_half_on = want;
     g_walked_inv = false;
@@ -853,7 +853,7 @@ static void post() {
         log_line("SMOOTH-003: walks=%ld stepped=%ld clock_only=%ld batches=%ld pays=%ld gated(seq=%ld motev=%ld) "
                  "loopguard(wrap=%ld clamp=%ld hold=%ld) stock_steps=%ld loopend_holds=%ld sanity_reverts=%ld diag_events=%ld half=%d live=%d",
                  g_walks, g_stepped, g_clock_only, g_batches, g_pays, g_gated_seq, g_gated_motev,
-                 g_guard_wrap, g_guard_clamp, g_guard_hold, g_stock_steps, g_loopend_holds, g_sanity_reverts, g_diag_events, *g_half, smooth_live());
+                 g_guard_wrap, g_guard_clamp, g_guard_hold, g_stock_steps, g_loopend_holds, g_sanity_reverts, g_diag_events, *g_half, smooth_live(3));
     }
     static LONG reported_s = 0;
     if (!reported_s && g_stock_steps > 0) {

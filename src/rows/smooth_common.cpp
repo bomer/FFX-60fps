@@ -5,10 +5,11 @@
 #include <string.h>
 
 static volatile LONG g_live = 1;
+static volatile LONG g_off_row = 0;              // Ctrl+F7: 0 = none, else SMOOTH-00<n> alone off
 
 bool smooth_master() { return config_row("SMOOTH", 1) != 0; }
 
-bool smooth_live() { return g_live != 0; }
+bool smooth_live(int row) { return g_live != 0 && (row == 0 || row != g_off_row); }
 
 static bool focused() {
     HWND fg = GetForegroundWindow();
@@ -25,6 +26,14 @@ void smooth_poll_hotkey() {
     bool edge = down && !prev;
     prev = down;
     if (!edge || !focused()) return;
+    // Ctrl+F7 bisects: SMOOTH-001 off -> SMOOTH-002 off -> SMOOTH-003 off -> none (U 12/10/2026: one-frame boss
+    // ghost in the Echuilles battle, gone with F7).
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
+        g_off_row = (g_off_row + 1) % 4;
+        if (g_off_row) log_line("Ctrl+F7: only SMOOTH-00%ld off (others %s)", g_off_row, g_live ? "on" : "off by F7");
+        else log_line("Ctrl+F7: all SMOOTH rows follow F7 (%s)", g_live ? "on" : "off");
+        return;
+    }
     g_live = g_live ? 0 : 1;
     log_line("F7: SMOOTH rows %s", g_live ? "ON" : "OFF (installed, pass-through)");
 }

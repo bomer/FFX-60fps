@@ -99,7 +99,7 @@ static void on_call(int vp) {
     h.has_pend = true;
     float* blk = g_fovblk ? (float*)((uint8_t*)g_fovblk + vp * 0x1C0) : nullptr;
     if (blk) for (int i = 0; i < 3; i++) h.pendfov[i] = *(float*)((uint8_t*)blk + k_fovoff[i]);
-    if (!smooth_live() || ours) return;
+    if (!smooth_live(1) || ours) return;
     g_logic_calls++;
     if (tag == 1 && vp == 1) return;                          // special commit paths (MsCommitCameraFovAspect)
     if (!h.valid || h.tag != tag) { g_skip_hist++; return; }
@@ -186,7 +186,7 @@ static void post() {
     if (g_diag && g_logic_calls - last >= 600) {
         last = g_logic_calls;
         log_line("SMOOTH-001: logic calls=%ld interp=%ld interp_cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld | src=%d live=%d",
-                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, src_tag(), smooth_live());
+                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, src_tag(), smooth_live(1));
     }
     static LONG reported = 0;
     if (!reported && g_st.interp > 0) {
