@@ -105,6 +105,7 @@
     <ClCompile Include="src\x2\rows\X2-LOOP-004.cpp" />
     <ClCompile Include="src\x2\rows\X2-LOOP-005.cpp" />
     <ClCompile Include="src\x2\rows\X2-UI-001.cpp" />
+    <ClCompile Include="src\x2\rows\X2-UI-017.cpp" />
     <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\hook.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\trampoline.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
