@@ -9,11 +9,12 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009;
+extern Row row_MAG008, row_MAG009, row_LOOP005;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
     &row_MAG009,                                 // rows/X2-MAG-009.cpp
+    &row_LOOP005,                                // rows/X2-LOOP-005.cpp
     nullptr
 };
 
