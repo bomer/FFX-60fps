@@ -13,6 +13,7 @@ enum { MAX_MODS = 8, MAX_SECS = 4, REPORT_EVERY = 300, TOP = 12 };
 struct Sec { uint8_t* p; uint32_t len; uint8_t* buf; uint16_t* hits; };
 struct Mod {
     uint8_t* base;
+    uint8_t* load_base;  // kept after unload (base goes null), for DLL-VA ranges in the report
     uint32_t size;
     char     name[24];
     bool     scanned, dead, snap;
@@ -75,7 +76,7 @@ static void report(Mod& m, const char* why) {
                 if (s.hits[i]) { gap = 0; last = i; if (s.hits[i] > mx) mx = s.hits[i]; }
                 else gap++;
             }
-            r[n].off = (uint32_t)(s.p - m.base) + start * 4;
+            r[n].off = (uint32_t)(s.p - m.load_base) + start * 4;
             r[n].len = (last - start + 1) * 4;
             r[n].maxhit = mx;
             n++;
@@ -98,6 +99,7 @@ static void on_load(uint8_t* base, uint32_t size, const char* name) {
         m.size = size;
         strncpy(m.name, name, sizeof(m.name) - 1);
         m.base = base;
+        m.load_base = base;
         return;
     }
 }
