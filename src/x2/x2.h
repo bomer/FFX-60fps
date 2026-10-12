@@ -76,6 +76,11 @@ int  pacing_kind();
 inline bool render_only() { return pacing_kind() == INV_BUILD; }
 void pacing_hold_stock(const char* who, bool hold); // a row asks for stock pacing (e.g. FMV)
 
+// ---------------------------------------------------------------- x2_magic_mods.cpp
+typedef void (*magic_load_fn)(uint8_t* base, uint32_t size, const char* name);   // loader lock
+typedef void (*magic_unload_fn)(uint8_t* base);
+bool magic_mods_subscribe(const char* row, magic_load_fn on_load, magic_unload_fn on_unload);  // init thread
+
 // ---------------------------------------------------------------- x2_rows.cpp
 // A row = one ledger row's mitigation (ID "X2-..." = [rows] key). install() runs once on the init thread after
 // the signature scan; pre()/post() run around every invocation while the row is on.
