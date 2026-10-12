@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001, row_DIAGRATE;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -23,6 +23,7 @@ static Row* g_rows[] = {
     &row_MAG006,                                 // rows/X2-MAG-006.cpp
     &row_UI014,                                  // rows/X2-UI-014.cpp
     &row_TEXANIM001,                             // rows/X2-TEXANIM-001.cpp
+    &row_DIAGRATE,                               // rows/X2-DIAG-RATE.cpp (diagnostic, default 0)
     nullptr
 };
 

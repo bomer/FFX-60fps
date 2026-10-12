@@ -111,6 +111,7 @@
     <ClCompile Include="src\x2\rows\X2-MAG-006.cpp" />
     <ClCompile Include="src\x2\rows\X2-UI-014.cpp" />
     <ClCompile Include="src\x2\rows\X2-TEXANIM-001.cpp" />
+    <ClCompile Include="src\x2\rows\X2-DIAG-RATE.cpp" />
     <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\hook.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\trampoline.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
