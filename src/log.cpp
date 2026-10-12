@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// fps60.log next to FFX.exe (install lines, row toggles, pacing events). Flushed per line so the
-// tail survives a crash. Ported unchanged from src/framediff/src/log.cpp.
+// fps60.log next to FFX.exe (install lines, row toggles, pacing events). Each line is handed to the OS with
+// WriteFile at once, so the tail survives a game crash (the OS cache still writes it). No FlushFileBuffers: it waited
+// for the disk on the game thread and stalled the game 1.7 s on one DIAG-FRAMETIME line (D 12/10/2026 18:03:30,
+// "rows: DIAG-FRAMETIME pre took 1708.6 ms"; U: big stutter). Only an OS crash or power loss can lose lines now.
 #include "fps60.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -61,7 +63,6 @@ static bool log_write(bool try_only, const char* fmt, va_list args) {
     if (g_log != INVALID_HANDLE_VALUE) {
         DWORD written;
         WriteFile(g_log, line, (DWORD)k, &written, nullptr);
-        FlushFileBuffers(g_log);
     }
     LeaveCriticalSection(&g_log_cs);
     if (!try_only) OutputDebugStringA(line);
