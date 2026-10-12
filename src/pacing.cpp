@@ -67,12 +67,23 @@ void pacing_pre() {
         return;
     }
 
-    if (!g_was_active) PLOG("pacing: 60 Hz on at inv %llu (game divider %u)", g_inv, g_wanted);
+    if (!g_was_active) PLOG("pacing: 60 Hz on at inv %llu (game divider %u, frame counter %u, next %s)", g_inv, g_wanted,
+                            *g_frame_counter, g_phase ? "logic" : "render-only");
     if (*g_divider != 1) {
         if (g_was_active) PLOG("pacing: divider was %u at pre of inv %llu - re-asserted 1", *g_divider, g_inv);
         set_divider(1);
     }
 
+#ifdef FPS60_DEV
+    // Dev hotkey Num 1: shift the logic/render-only alternation by one invocation (U 12/10/2026: Echuilles light-ray
+    // flicker and boss ghost come and go between sessions; test whether they follow the alternation phase against a
+    // per-invocation toggle in the game).
+    static bool prev1 = false;
+    if (dev_key(VK_NUMPAD1, &prev1)) {
+        g_phase ^= 1;
+        log_line("Num1: pacing phase shifted by one invocation at inv %llu (frame counter %u)", g_inv, *g_frame_counter);
+    }
+#endif
     bool backlog = *g_backlog_count > 1;
     int target;
     if (backlog && g_cfg.alt_backlog == ALT_BACKLOG_LOGIC) {
