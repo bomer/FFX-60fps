@@ -35,15 +35,24 @@ static bool paced_kind() {
 
 static uint32_t live(const ModClock& c) { return *c.src * c.mul; }
 
+// Source delta since the last commit. FFX-2 resyncs the vblank counter (FUN_00604d30, e.g. around loads: D 12/10/2026
+// 23:09:50, -1955), so a backwards or implausibly large step counts as 0 and the mod clock stays monotonic.
+static uint32_t delta(const ModClock& c, uint32_t now) {
+    int32_t d = (int32_t)(now - c.last);
+    return (d < 0 || d > 0x1000) ? 0 : (uint32_t)d;
+}
+
 static uint32_t value(const ModClock& c) {
-    uint64_t d = (uint32_t)(live(c) - c.last);
+    uint64_t d = delta(c, live(c));
     uint64_t h = c.half + (paced_kind() ? d : d * 2);
     return c.base + (uint32_t)(h >> 1);
 }
 
 static void commit(ModClock& c) {
     uint32_t now = live(c);
-    uint64_t d = (uint32_t)(now - c.last);
+    uint64_t d = delta(c, now);
+    if (d == 0 && now != c.last)
+        log_line("X2-CLK-002: %s source jumped %d (resync) - mod clock held, re-based", c.name, (int32_t)(now - c.last));
     c.half += paced_kind() ? d : d * 2;
     c.last = now;
 }
@@ -87,9 +96,9 @@ static void report(ModClock& c) {
     LONG n = InterlockedExchange(&c.calls, 0);
     uint32_t src = live(c), mod = c.base + (uint32_t)(c.half >> 1);
     if (n > 0) {
-        uint32_t ds = src - c.rep_src, dm = mod - c.rep_mod;
-        log_line("X2-CLK-002: %s: %ld calls in the last 600 invocations; source +%u, mod clock +%u (ratio %.2f)",
-                 c.name, n, ds, dm, ds ? (double)dm / (double)ds : 0.0);
+        int32_t ds = (int32_t)(src - c.rep_src), dm = (int32_t)(mod - c.rep_mod);
+        log_line("X2-CLK-002: %s: %ld calls in the last 600 invocations; source %+d, mod clock %+d (ratio %.2f)",
+                 c.name, n, ds, dm, ds > 0 ? (double)dm / (double)ds : 0.0);
     }
     c.rep_src = src;
     c.rep_mod = mod;
