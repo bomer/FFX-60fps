@@ -222,7 +222,7 @@ static void wr_dump() {
 // particle matrix block +0x10..+0x4C (seen re-initialised on paused steps).
 typedef void(__cdecl* phase_t)(void*);
 typedef int(__cdecl* opfn_t)(int, int, int, int);
-enum { NPH = 8 };                                  // 0..2 phases, 3..7 ungated ops of the river program
+enum { NPH = 13, NOPS = NPH - 3 };                 // 0..2 phases, 3.. ungated ops (river program, or DIAG-FX010-WRITES-OPS)
 static void*    g_ph_tramp[NPH] = {};
 static uint8_t* g_ph_fn[NPH] = {};
 static volatile int g_ph_active = 0;              // 1 while a selected paused step runs (game thread)
@@ -233,6 +233,8 @@ static int      g_ph_grp[2][WR_MAXP + 1];
 static int      g_ph_n[2] = {};
 static uint32_t g_ph_all[NPH], g_ph_mat[NPH], g_ph_calls[NPH];
 static uint32_t g_ph_first[NPH][4];
+static uint32_t g_ph_offs[NPH][12];             // first distinct changed group<<16|offset per phase / op
+static int      g_ph_offs_n[NPH];
 static int      g_ph_first_n[NPH];
 
 static void ph_before(int B) {
@@ -253,6 +255,10 @@ static void ph_after(int B, int P) {
             for (int o = 0; o < len; o += 4)
                 if (*(uint32_t*)(g_ph_ptr[B][i] + o) != *(uint32_t*)(g_ph_buf[B][i] + o)) {
                     g_ph_all[P]++;
+                    uint32_t k = (uint32_t)(g_ph_grp[B][i] << 16 | o);
+                    int j = 0;
+                    while (j < g_ph_offs_n[P] && g_ph_offs[P][j] != k) j++;
+                    if (j == g_ph_offs_n[P] && j < 12) g_ph_offs[P][g_ph_offs_n[P]++] = k;
                     if (g_ph_grp[B][i] >= 0 && o >= 0x10 && o < 0x50) {
                         g_ph_mat[P]++;
                         if (g_ph_first_n[P] < 4) g_ph_first[P][g_ph_first_n[P]++] = (uint32_t)(g_ph_grp[B][i] << 16 | o);
@@ -279,18 +285,28 @@ template <int P> static int __cdecl h_op(int a, int b, int c, int d) {
     return r;
 }
 static void* const k_phase_thunk[NPH] = {(void*)&h_phase<0>, (void*)&h_phase<1>, (void*)&h_phase<2>,
-    (void*)&h_op<3>, (void*)&h_op<4>, (void*)&h_op<5>, (void*)&h_op<6>, (void*)&h_op<7>};
-static const uint32_t k_op_va[5] = {0x72D390, 0x72D1B0, 0x734BD0, 0x7354C0, 0x740ED0};
-static const char* const k_op_pat[5] = {
+    (void*)&h_op<3>, (void*)&h_op<4>, (void*)&h_op<5>, (void*)&h_op<6>, (void*)&h_op<7>, (void*)&h_op<8>,
+    (void*)&h_op<9>, (void*)&h_op<10>, (void*)&h_op<11>, (void*)&h_op<12>};
+static uint32_t k_op_va[NOPS] = {0x72D390, 0x72D1B0, 0x734BD0, 0x7354C0, 0x740ED0};
+static const char* k_op_pat[NOPS] = {
     "55 8B EC 51 8B 45 10 8B 4D 08 8B 40", "55 8B EC 51 8B 45 10 8B 4D 08 8B 40",
     "55 8B EC 56 8B 35 ?? ?? ?? ?? 57 8B", "55 8B EC 83 EC 58 A1 ?? ?? ?? ?? 33", "55 8B EC 51 56 57 8B 7D 08 FF 77 04"};
+static int k_op_n = 5;
+static char g_ph_nm[NPH][40];
 
 static void ph_dump() {
-    static const char* nm[NPH] = {"pre callbacks 0x712E80", "particle ops 0x717010", "post callbacks 0x712E00",
-        "op 0x72D390", "op 0x72D1B0", "op 0x734BD0", "op 0x7354C0", "op 0x740ED0"};
-    for (int p = 0; p < NPH; p++) {
+    static const char* nm[3] = {"pre callbacks 0x712E80", "particle ops 0x717010", "post callbacks 0x712E00"};
+    for (int p = 0; p < 3 + k_op_n; p++) {
+        if (p >= 3) { if (!g_ph_fn[p]) continue; sprintf_s(g_ph_nm[p], "op 0x%06X", k_op_va[p - 3]); }
         log_line("DIAG-FX010-WRITES phase %s: paused calls %u, changed dwords %u, matrix block +0x10..+0x4C %u (first: %X %X %X %X)",
-                 nm[p], g_ph_calls[p], g_ph_all[p], g_ph_mat[p], g_ph_first[p][0], g_ph_first[p][1], g_ph_first[p][2], g_ph_first[p][3]);
+                 p < 3 ? nm[p] : g_ph_nm[p], g_ph_calls[p], g_ph_all[p], g_ph_mat[p], g_ph_first[p][0], g_ph_first[p][1], g_ph_first[p][2], g_ph_first[p][3]);
+        if (g_ph_offs_n[p]) {
+            char b[160]; int n = 0;
+            for (int j = 0; j < g_ph_offs_n[p]; j++)
+                n += sprintf_s(b + n, sizeof(b) - n, " g%d+0x%X", (int)(int16_t)(g_ph_offs[p][j] >> 16), g_ph_offs[p][j] & 0xFFFF);
+            log_line("    changed fields:%s", b);
+        }
+        g_ph_offs_n[p] = 0;
         g_ph_calls[p] = g_ph_all[p] = g_ph_mat[p] = 0; g_ph_first_n[p] = 0;
         g_ph_first[p][0] = g_ph_first[p][1] = g_ph_first[p][2] = g_ph_first[p][3] = 0;
     }
@@ -354,6 +370,43 @@ static void deferred_flush(void* prog, bool drop) {
     g_deferred_n = w;
 }
 
+// FX-010-ROLLBACK (test switch, default 0): on paused steps of selected programs, save the program entry (0x80) and
+// every particle record (first RB_REC bytes) before the step and put them back after it, so a paused step leaves no
+// state behind (Besaid light shafts alternate per frame with FX-010; U 12/10/2026).
+enum { RB_REC = 0x400, RB_MAXP = 64 };
+static bool     g_rollback = false;
+static uint8_t  g_rb_buf[RB_MAXP + 1][RB_REC];
+static uint8_t* g_rb_ptr[RB_MAXP + 1];
+static int      g_rb_len[RB_MAXP + 1];
+static int      g_rb_n = 0;
+static volatile LONG g_rb_calls = 0;
+
+static void rb_save(uint8_t* prog) {
+    g_rb_n = 0;
+    __try {
+        g_rb_ptr[0] = prog; g_rb_len[0] = 0x80; memcpy(g_rb_buf[0], prog, 0x80); g_rb_n = 1;
+        int ng = *(int*)(prog + 0x18);
+        uint8_t* groups = *(uint8_t**)(prog + 0x3C);
+        for (int g = 0; g < ng && g < 32 && groups; g++) {
+            uint8_t* grp = groups + g * 0x10;
+            uint8_t* part = *(uint8_t**)(grp + 4);
+            int cnt = *(uint16_t*)(grp + 0xC);
+            for (int k = 0; k < cnt && part && g_rb_n <= RB_MAXP; k++) {
+                g_rb_ptr[g_rb_n] = part; g_rb_len[g_rb_n] = RB_REC; memcpy(g_rb_buf[g_rb_n], part, RB_REC); g_rb_n++;
+                part = *(uint8_t**)part;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_rb_n = 0; }
+}
+
+static void rb_restore() {
+    __try { for (int i = 0; i < g_rb_n; i++) memcpy(g_rb_ptr[i], g_rb_buf[i], g_rb_len[i]); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (g_rb_n && InterlockedIncrement(&g_rb_calls) == 1)
+        log_line("FX-010-ROLLBACK: first paused step rolled back (%d records)", g_rb_n);
+    g_rb_n = 0;
+}
+
 static int __cdecl h_fp_step(void* prog, uint32_t flags) {
     if (row_FX010.on && !g_disabled && pacing_kind() == INV_BUILD && prog_selected(prog)) {
         if (*(int32_t*)((uint8_t*)prog + 8) == 0 && *(int32_t*)((uint8_t*)prog + 0xC) == 0) {
@@ -363,9 +416,11 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         InterlockedIncrement(&g_paused_calls);
         if (g_diag_submit) diag_step_begin(2);
         if (g_diag_writes) { wr_snapshot((uint8_t*)prog); g_ph_active = 1; }
+        if (g_rollback) rb_save((uint8_t*)prog);
         int r = ppp_step_paused(g_tramp, prog, flags);
         g_ph_active = 0;
         if (g_diag_writes) wr_diff(2);
+        if (g_rollback) rb_restore();
         if (g_diag_submit) diag_step_end(prog, 2);
         return r;
     }
@@ -424,6 +479,43 @@ static const char* k_dc_sig =
 
 static const uint8_t* g_dc_after = nullptr;     // accept only matches past this one
 static bool dc_accept(const uint8_t* m) { return m > g_dc_after && read_abs(m + 2) == (uint8_t*)g_ppp_pause; }
+
+// ---- FX-010-KEYADD (default 1): draw op 0x75AF80 (no pause check) adds two rates into its data (+0x9C, +0xA8)
+// whenever the op key equals the particle's +0xC; a gated step op resets them on logic steps only, so a paused call
+// added a second time and drew base + 2r (Besaid ruins light shafts, U 12/10/2026: alternate per frame; D:
+// DIAG-FX010-WRITES-OPS, +0x1CC/+0x1D8 changed on every paused call; FX-010-ROLLBACK did not help). Its gated sibling
+// 0x738EC0 skips the same add while paused. On paused calls the key is made not to match for the call.
+static bool     g_keyadd = false;
+static uint8_t* g_keyadd_fn = nullptr;
+static int (__cdecl* g_keyadd_tramp)(int, int, int, int) = nullptr;
+static volatile LONG g_keyadd_held = 0;
+
+static int __cdecl h_keyadd(int part, int data, int c, int d) {
+    int32_t* key = nullptr;
+    int32_t saved = 0;
+    if (*g_ppp_pause != 0) {
+        __try {
+            int32_t* k = (int32_t*)(intptr_t)data;
+            if (*k == *(int32_t*)(intptr_t)(part + 0xC)) { key = k; saved = *k; *k = saved + 1; }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { key = nullptr; }
+    }
+    int r = g_keyadd_tramp(part, data, c, d);
+    if (key) {
+        *key = saved;
+        if (InterlockedIncrement(&g_keyadd_held) == 1) log_line("FX-010-KEYADD: first keyed add held on a paused call");
+    }
+    return r;
+}
+
+static bool keyadd_find() {
+    // aligned-stack prologue, then MOV EDI,[EBX+8]; LEA ESI,[EDI+0xA0]; ADD ESI,EAX; MOV EAX,[ECX]; CMP EAX,[EDI+0xC]; JNE
+    g_keyadd_fn = sig_find_unique("FX-010-KEYADD keyed draw op (0x75AF80)",
+        "53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 83 EC 38 A1 ?? ?? ?? ?? 33 C5 89 45 FC "
+        "8B 43 10 8B 4B 0C 8B 40 0C 56 8B 00 57 8B 7B 08 8D B7 A0 00 00 00 03 F0 8B 01 3B 47 0C 75 32 D9 41 08",
+        0x75AF80);
+    if (!g_keyadd_fn) log_line("  FX-010-KEYADD: op not found - off");
+    return g_keyadd_fn != nullptr;
+}
 
 static bool drawcam_find() {
     const uint32_t expect[2] = {0x747713, 0x748963};
@@ -546,8 +638,11 @@ static bool install() {
         log_line("  FX-010: spawn skip OFF (FX-010-SPAWN=0)");
     }
     g_drawcam = config_row("FX-010-DRAWOPS", 1) != 0;
+    g_keyadd = config_row("FX-010-KEYADD", 1) != 0;
     g_diag_ops = config_row("DIAG-FX010-OPS", 0) != 0;
     g_diag_writes = config_row("DIAG-FX010-WRITES", 0) != 0;
+    g_rollback = config_row("FX-010-ROLLBACK", 0) != 0;
+    if (g_rollback) log_line("  FX-010: FX-010-ROLLBACK on: paused steps of selected programs leave their records unchanged");
     g_loopdefer = config_row("FX-010-LOOPDEFER", 1) != 0;
     if (g_loopdefer) {
         // FUN_00717010 tail: MOV ECX,[EBX+0x18]; PUSH ESI; MOV [ESI+0xC],ECX; CALL FUN_00712d20; MOV EBX,[EBP-0xC]; ADD ESP,4
@@ -592,6 +687,7 @@ static bool install() {
         log_line("  DIAG-FX010SUBMIT: %s", g_diag_submit ? "on (submit counts per caller/program, every 600 invocations)" : "off (submit not found)");
     }
     if (g_drawcam && !drawcam_find()) return false;
+    if (g_keyadd && !keyadd_find()) g_keyadd = false;
     log_line("  FX-010: FUN_007122f0 gva=0x%08X, entry hooked on the game thread",
              rt_to_gva_exe(g_entry));
     return true;
@@ -621,7 +717,23 @@ static void pre() {
         }
         if (ok) log_line("DIAG-FX010-WRITES: phase hooks on 0x712E80 / 0x717010 / 0x712E00");
         // diagnostic only: the river program's ungated ops by VA (FX-010 proved the build), bytes verified
-        for (int k = 0; ok && k < 5; k++) {
+        // DIAG-FX010-WRITES-OPS=<hex VA>,...: hook these ops instead (prologue checked: PUSH EBP; MOV EBP,ESP or the
+        // aligned-stack PUSH EBX; MOV EBX,ESP)
+        char lst[200];
+        config_str("rows", "DIAG-FX010-WRITES-OPS", lst, sizeof(lst), "");
+        if (lst[0]) {
+            k_op_n = 0;
+            for (char* q = lst; *q && k_op_n < NOPS;) {
+                char* e = nullptr;
+                unsigned long v = strtoul(q, &e, 16);
+                if (e == q) { q++; continue; }
+                k_op_va[k_op_n] = (uint32_t)v;
+                k_op_pat[k_op_n] = sig_match(exe_base() + (v - 0x400000), "53 8B DC") ? "53 8B DC 83 EC 08" : "55 8B EC";
+                k_op_n++;
+                q = e;
+            }
+        }
+        for (int k = 0; ok && k < k_op_n; k++) {
             uint8_t* f = exe_base() + (k_op_va[k] - 0x400000);
             bool hk = sig_match(f, k_op_pat[k]) && hook_entry("DIAG-FX010-WRITES op", f, k_phase_thunk[3 + k], &g_ph_tramp[3 + k]);
             if (hk) g_ph_fn[3 + k] = f;
@@ -643,6 +755,11 @@ static void pre() {
         log_line("FX-010-LOOPDEFER: loop restarts of paced logic steps deferred to the program's next logic step");
     }
     if (g_drawcam && !drawcam_patch()) log_line("FX-010-DRAWOPS: patch failed (draw ops still blink while paused)");
+    if (g_keyadd) {
+        if (hook_entry("FX-010-KEYADD", g_keyadd_fn, (void*)&h_keyadd, (void**)&g_keyadd_tramp))
+            log_line("FX-010-KEYADD: draw op gva 0x%08X hooked: keyed add skipped on paused calls", rt_to_gva_exe(g_keyadd_fn));
+        else g_keyadd = false;
+    }
 }
 
 static void post() {
