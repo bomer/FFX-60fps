@@ -418,7 +418,10 @@ static void rb_restore() {
 static int  g_extrap = 0, g_extrap_pct = 50;
 static LONG g_fx_n = 1;                          // unpaused (logic) invocations; main thread only
 static LONG g_ex_parts = 0, g_ex_words = 0, g_ex_lines = 0;
-struct PSnap { uint8_t* p; uint32_t len; LONG ncur, nprev; uint8_t* cur; uint8_t* prev; };
+// lo/hi: per word, the range of this life so far; plo/phi: of the previous life of a looping particle (its age went
+// back: the loop restart), so a repeated fade is never moved past the peak it reached last loop.
+struct PSnap { uint8_t* p; uint32_t len; LONG ncur, nprev, nprev2; uint8_t* cur; uint8_t* prev; uint8_t* prev2;
+               float* lo; float* hi; float* plo; float* phi; bool plife; };
 enum { PS_N = 4096, EX_MAXW = 1 << 16 };
 static PSnap* g_psnap = nullptr;
 static uint32_t g_ex_off[EX_MAXW];               // touched words (record pointer + offset) for the restore
@@ -435,10 +438,11 @@ static PSnap* psnap_find(uint8_t* p, bool create) {
         if (!stale && (!e->p || e->ncur < g_fx_n - 2)) stale = e;
     }
     if (!create || !stale) return nullptr;
-    stale->p = p; stale->ncur = g_fx_n; stale->nprev = 0;     // stamped: not "stale" again in this step
+    stale->p = p; stale->ncur = g_fx_n; stale->nprev = stale->nprev2 = 0; stale->plife = false;   // stamped: not "stale" again in this step
     return stale;
 }
 
+// Calls fn(particle, record length, group def) for every live particle of the program.
 template <class F> static void for_particles(uint8_t* prog, F fn) {
     int ng = *(int*)(prog + 0x18);
     uint8_t* groups = *(uint8_t**)(prog + 0x3C);
@@ -450,48 +454,142 @@ template <class F> static void for_particles(uint8_t* prog, F fn) {
         if (len < 0x10 || len > 0x2000) continue;
         uint8_t* part = *(uint8_t**)(grp + 4);
         int cnt = *(uint16_t*)(grp + 0xC);
-        for (int k = 0; k < cnt && k < 4096 && part; k++) { fn(part, len & ~3u); part = *(uint8_t**)part; }
+        for (int k = 0; k < cnt && k < 4096 && part; k++) { fn(part, len & ~3u, def); part = *(uint8_t**)part; }
     }
+}
+
+// How often each header word changes per tick, per group def (EMA, 255 = every tick). Moving parts change on every
+// tick; a stepped word (+0x12C of the Echuilles rays, ~30% of ticks) never reaches the bar, so it is never moved.
+struct DefRate { uint8_t* def; LONG seen; uint8_t r[0x800]; };
+enum { NDR = 64, RATE_MIN = 200 };
+static DefRate* g_dr = nullptr;
+
+static DefRate* def_rate(uint8_t* def, bool create) {
+    if (!g_dr) return nullptr;
+    DefRate* old = &g_dr[0];
+    for (int i = 0; i < NDR; i++) {
+        if (g_dr[i].def == def) { g_dr[i].seen = g_fx_n; return &g_dr[i]; }
+        if (g_dr[i].seen < old->seen) old = &g_dr[i];
+    }
+    if (!create) return nullptr;
+    old->def = def; old->seen = g_fx_n;
+    memset(old->r, 0, sizeof(old->r));
+    return old;
 }
 
 static void ex_snapshot(uint8_t* prog) {
     __try {
-        for_particles(prog, [&](uint8_t* part, uint32_t len) {
+        for_particles(prog, [&](uint8_t* part, uint32_t len, uint8_t* def) {
             PSnap* e = psnap_find(part, true);
             if (!e) return;
             if (e->len != len) {
-                free(e->cur); free(e->prev);
-                e->cur = (uint8_t*)malloc(len); e->prev = (uint8_t*)malloc(len);
-                e->len = (e->cur && e->prev) ? len : 0; e->ncur = e->nprev = 0;
+                free(e->cur); free(e->prev); free(e->prev2); free(e->lo); free(e->hi); free(e->plo); free(e->phi);
+                e->cur = (uint8_t*)malloc(len); e->prev = (uint8_t*)malloc(len); e->prev2 = (uint8_t*)malloc(len);
+                e->lo = (float*)malloc(len); e->hi = (float*)malloc(len); e->plo = (float*)malloc(len); e->phi = (float*)malloc(len);
+                e->len = (e->cur && e->prev && e->prev2 && e->lo && e->hi && e->plo && e->phi) ? len : 0;
+                e->ncur = e->nprev = e->nprev2 = 0;
+                e->plife = false;
                 if (!e->len) return;
             }
-            uint8_t* t = e->prev; e->prev = e->cur; e->cur = t;
-            e->nprev = e->ncur;
+            uint8_t* t = e->prev2; e->prev2 = e->prev; e->prev = e->cur; e->cur = t;
+            e->nprev2 = e->nprev; e->nprev = e->ncur;
             memcpy(e->cur, part, len);
             e->ncur = g_fx_n;
+            {
+                uint32_t nw = len / 4;
+                const float* c = (const float*)e->cur;
+                bool restart = e->nprev == e->ncur - 1 && *(int32_t*)(e->cur + 0xC) < *(int32_t*)(e->prev + 0xC);
+                if (restart) {                               // a loop ended: its range becomes the previous life's
+                    float* t1 = e->plo; e->plo = e->lo; e->lo = t1;
+                    float* t2 = e->phi; e->phi = e->hi; e->hi = t2;
+                    e->plife = true;
+                }
+                if (restart || e->nprev != e->ncur - 1) { memcpy(e->lo, c, len); memcpy(e->hi, c, len); if (!restart) e->plife = false; }
+                else for (uint32_t w = 4; w < nw; w++) { if (c[w] < e->lo[w]) e->lo[w] = c[w]; if (c[w] > e->hi[w]) e->hi[w] = c[w]; }
+            }
+            if (e->nprev == e->ncur - 1 && *(int32_t*)(e->cur + 0xC) > *(int32_t*)(e->prev + 0xC)) {
+                DefRate* d = def_rate(def, true);
+                uint32_t hlen = (uint32_t)*(int*)(def + 0x20) & ~3u;
+                if (hlen > len) hlen = len;
+                for (uint32_t o = 0x10; d && o < hlen && o / 4 < 0x800; o += 4) {
+                    uint8_t& r = d->r[o / 4];
+                    bool chg = *(uint32_t*)(e->cur + o) != *(uint32_t*)(e->prev + o);
+                    r = (uint8_t)(r - (r >> 3) + (chg ? 31 : 0));
+                }
+            }
         });
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 static bool floatish(float x) { float a = x < 0 ? -x : x; return x == 0.0f || (a >= 1e-4f && a <= 1e6f); }
 
+// Which words to move (U 12/10/2026: EXTRAP flickers the Echuilles light rays). Record layout (FUN_00717010, S): a
+// header of particle state, size group def +0x20 (age at +0xC), then one handle per op (its current keyframe in
+// the program's shared op data), so every moved float is a header word.
+// FX-010-EXTRAP-PROGS=a-b: only these program slots; -SKIPOFFS=<hex byte offset>,...: never these header words;
+// -ONLYOFFS=...: only these; -DIAG=1: per program and word offset, how often it was moved (every ~20 s).
+static int g_ex_lo = 0, g_ex_hi = 0x7FFFFFFF, g_ex_diag = 0;
+static uint8_t g_ex_skipw[0x800];                // per word index: 1 = never move
+static int g_ex_nonly = 0;
+struct ExCnt { int prog; uint32_t off; LONG n; };
+static ExCnt g_exc[512];
+static int   g_nexc = 0;
+
+static int  g_ex_unit = 1;                       // FX-010-EXTRAP-UNIT=0: also move 0..1 words
+static int  g_ex_trace = -1;                     // FX-010-EXTRAP-TRACE=<hex offset>: log moves of this header word
+static LONG g_ex_trace_n = 0;
+
+static void ex_count(int prog, uint32_t off) {
+    for (int i = 0; i < g_nexc; i++) if (g_exc[i].prog == prog && g_exc[i].off == off) { g_exc[i].n++; return; }
+    if (g_nexc < 512) g_exc[g_nexc++] = { prog, off, 1 };
+}
+
 static void ex_apply(uint8_t* prog) {
     g_ex_nw = 0;
+    int pi = prog_index(prog);
+    if (pi < g_ex_lo || pi > g_ex_hi) return;
     float k = g_extrap_pct / 100.0f;
     __try {
-        for_particles(prog, [&](uint8_t* part, uint32_t len) {
+        for_particles(prog, [&](uint8_t* part, uint32_t len, uint8_t* def) {
+            uint32_t hlen = (uint32_t)*(int*)(def + 0x20) & ~3u;  // op handles after the header are not state
+            if (hlen > len) hlen = len;
             PSnap* e = psnap_find(part, false);
-            if (!e || e->len != len || e->ncur != g_fx_n || e->nprev != g_fx_n - 1) return;
+            if (!e || e->len != len || e->ncur != g_fx_n || e->nprev != g_fx_n - 1 || e->nprev2 != g_fx_n - 2) return;
+            bool age3 = *(int32_t*)(e->prev + 0xC) > *(int32_t*)(e->prev2 + 0xC);   // same particle three ticks
+            DefRate* drate = def_rate(def, false);
             int32_t ac = *(int32_t*)(e->cur + 0xC), ap = *(int32_t*)(e->prev + 0xC);
             if (ac <= ap || *(int32_t*)(part + 0xC) != ac) return;     // respawned, restarted or already changed
             bool any = false;
-            for (uint32_t o = 0x10; o < len && g_ex_nw < EX_MAXW; o += 4) {
+            for (uint32_t o = 0x10; o < hlen && g_ex_nw < EX_MAXW; o += 4) {
                 float a = *(float*)(e->prev + o), b = *(float*)(e->cur + o);
                 if (*(uint32_t*)(e->prev + o) == *(uint32_t*)(e->cur + o) || !floatish(a) || !floatish(b)) continue;
                 if (*(uint32_t*)(part + o) != *(uint32_t*)(e->cur + o)) continue;
                 if ((a < 0) != (b < 0)) continue;                    // sign flip (angle wrap, zero crossing): hold
+                // Steady motion only (U 12/10/2026: a stepped header word, +0x12C of the Echuilles light rays, changed
+                // on ~30% of ticks; moving it half a tick on every paused frame flickered the rays): the word moved
+                // in both of the last two ticks, the same way, by steps within half of each other.
+                if (!age3) continue;
+                if (!drate || drate->r[o / 4] < RATE_MIN) continue;   // changes on < ~80% of ticks: stepped
+                float z = *(float*)(e->prev2 + o), d1 = b - a, d0 = a - z;
+                if (!floatish(z) || d0 == 0.0f || (d0 < 0) != (d1 < 0)) continue;
+                // 0..1 words (alpha, colour, blend factors) stay at the tick value: +0x12C of the Echuilles rays, a
+                // 0.08..0.85 fade, still flashed when moved even inside last loop's range (U 12/10/2026).
+                if (g_ex_unit && z >= 0.0f && z <= 1.0f && a >= 0.0f && a <= 1.0f && b >= 0.0f && b <= 1.0f) continue;
+                float m = (d0 < 0 ? -d0 : d0) > (d1 < 0 ? -d1 : d1) ? (d0 < 0 ? -d0 : d0) : (d1 < 0 ? -d1 : d1);
+                float dd = d1 - d0;
+                if ((dd < 0 ? -dd : dd) > 0.5f * m) continue;
+                if (o / 4 < 0x800 && g_ex_skipw[o / 4]) continue;
+                if (g_ex_diag) ex_count(pi, o);
                 float x = b + k * (b - a);
                 if (b == 0.0f || (x < 0) != (b < 0)) x = 0.0f;
+                if (e->plife) {                              // looping particle: stay inside last loop's range
+                    float pl = e->plo[o / 4], ph = e->phi[o / 4];
+                    if (b <= ph && x > ph) x = ph;
+                    if (b >= pl && x < pl) x = pl;
+                }
+                if ((int)o == g_ex_trace && InterlockedIncrement(&g_ex_trace_n) <= 120)
+                    log_line("FX-010-EXTRAP-TRACE: program %d part %p age %d: +0x%X k-2 %.5f k-1 %.5f k %.5f -> drawn %.5f (rate %u)",
+                             pi, part, *(int32_t*)(e->cur + 0xC), o, z, a, b, x, drate ? drate->r[o / 4] : 0);
                 g_ex_rec[g_ex_nw] = part; g_ex_off[g_ex_nw] = o; g_ex_val[g_ex_nw] = *(uint32_t*)(e->cur + o); g_ex_nw++;
                 *(float*)(part + o) = x;
                 any = true;
@@ -743,7 +841,38 @@ static bool install() {
     g_rollback = config_row("FX-010-ROLLBACK", 0) != 0;
     g_extrap = config_row("FX-010-EXTRAP", 0);
     g_extrap_pct = config_row("FX-010-EXTRAP-PCT", 50);
+    g_ex_diag = config_row("FX-010-EXTRAP-DIAG", 0);
+    g_ex_unit = config_row("FX-010-EXTRAP-UNIT", 1);
+    {
+        char t[32];
+        config_str("rows", "FX-010-EXTRAP-TRACE", t, sizeof(t), "");
+        if (t[0]) g_ex_trace = (int)strtoul(t, nullptr, 16);
+        char b[512];
+        config_str("rows", "FX-010-EXTRAP-PROGS", b, sizeof(b), "");
+        int lo, hi;
+        if (b[0] && sscanf_s(b, "%d-%d", &lo, &hi) == 2 && lo <= hi) { g_ex_lo = lo; g_ex_hi = hi; }
+        else if (b[0] && sscanf_s(b, "%d", &lo) == 1) { g_ex_lo = g_ex_hi = lo; }
+        int nskip = 0;
+        for (int L = 0; L < 2; L++) {
+            config_str("rows", L ? "FX-010-EXTRAP-ONLYOFFS" : "FX-010-EXTRAP-SKIPOFFS", b, sizeof(b), "");
+            uint8_t listed[0x800] = {};
+            int n = 0;
+            for (char* q = b; *q;) {
+                char* e2 = nullptr;
+                unsigned long v = strtoul(q, &e2, 16);
+                if (e2 == q) { q++; continue; }
+                if (v / 4 < 0x800) { listed[v / 4] = 1; n++; }
+                q = e2;
+            }
+            if (!n) continue;
+            for (int w = 0; w < 0x800; w++) if (L ? !listed[w] : listed[w]) g_ex_skipw[w] = 1;
+            if (L) g_ex_nonly = n; else nskip = n;
+        }
+        if (g_ex_lo != 0 || g_ex_hi != 0x7FFFFFFF || nskip || g_ex_nonly)
+            log_line("  FX-010-EXTRAP: programs %d..%d, %d header words skipped, %d only", g_ex_lo, g_ex_hi, nskip, g_ex_nonly);
+    }
     g_psnap = (PSnap*)calloc(PS_N, sizeof(PSnap));
+    g_dr = (DefRate*)calloc(NDR, sizeof(DefRate));
     log_line("  FX-010-EXTRAP: %s (%d%% of a tick)", g_extrap ? "on" : "off", g_extrap_pct);
     if (g_rollback) log_line("  FX-010: FX-010-ROLLBACK on: paused steps of selected programs leave their records unchanged");
     g_loopdefer = config_row("FX-010-LOOPDEFER", 1) != 0;
@@ -810,6 +939,22 @@ static void pre() {
 #ifdef FPS60_DEV
     ex_hotkey();
 #endif
+    static LONG ex_dump_at = 0;
+    if (g_ex_diag && g_extrap && g_fx_n - ex_dump_at >= 600 && g_nexc) {
+        ex_dump_at = g_fx_n;
+        char line[600];
+        int pos = 0, prog = -1;
+        for (int i = 0; i <= g_nexc; i++) {
+            if (i == g_nexc || (prog >= 0 && g_exc[i].prog != prog) || pos > 520) {
+                if (pos) log_line("FX-010-EXTRAP-DIAG: program %d moved words (offset:count):%s", prog, line);
+                pos = 0;
+                if (i == g_nexc) break;
+            }
+            prog = g_exc[i].prog;
+            pos += _snprintf_s(line + pos, sizeof(line) - pos, _TRUNCATE, " %X:%ld", g_exc[i].off, g_exc[i].n);
+        }
+        g_nexc = 0;
+    }
     if (g_extrap && g_ex_parts - g_ex_lines >= 20000) {
         g_ex_lines = g_ex_parts;
         log_line("FX-010-EXTRAP: %ld particle draws extrapolated, %ld words", g_ex_parts, g_ex_words);
