@@ -94,15 +94,27 @@ static void hotkey_camera_rows() {
     log_line("F8: camera rows LOOP-005=%d LOOP-004=%d", rows[0]->on, rows[1]->on);
 }
 
+// A row hook that takes > 50 ms in one invocation is logged (spell-start pause, U 12/10/2026).
+static void row_call(Row* r, void (*fn)(), const char* what) {
+    static LARGE_INTEGER f = {};
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    fn();
+    QueryPerformanceCounter(&b);
+    double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+    if (ms > 50.0) log_line("rows: %s %s took %.1f ms", r->id, what, ms);
+}
+
 void rows_pre() {
     hotkey_camera_rows();
     for (Row** p = g_rows; *p; p++)
-        if ((*p)->on && (*p)->pre) { where_set(W_ROW_PRE, (int)(p - g_rows)); (*p)->pre(); }
+        if ((*p)->on && (*p)->pre) { where_set(W_ROW_PRE, (int)(p - g_rows)); row_call(*p, (*p)->pre, "pre"); }
 }
 
 void rows_post() {
     for (Row** p = g_rows; *p; p++)
-        if ((*p)->on && (*p)->post) { where_set(W_ROW_POST, (int)(p - g_rows)); (*p)->post(); }
+        if ((*p)->on && (*p)->post) { where_set(W_ROW_POST, (int)(p - g_rows)); row_call(*p, (*p)->post, "post"); }
 }
 
 int rows_count() { return (int)(sizeof(g_rows) / sizeof(g_rows[0])) - 1; }

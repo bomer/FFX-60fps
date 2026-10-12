@@ -40,13 +40,27 @@ static void CALLBACK dll_notif(ULONG reason, const MM_LDR_NOTIF_DATA* d, PVOID) 
 
     uint8_t* base = (uint8_t*)d->DllBase;
     LONG n = g_nsubs;
+    LARGE_INTEGER f, t0, a, b = {};
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    double slow_ms = 0;
+    const char* slow = "-";
     for (LONG i = 0; i < n; i++) {
         const Sub& s = g_subs[i];
+        QueryPerformanceCounter(&a);
         ldr_enter(s.row, reason, base);
         if (reason == 1 && s.on_load) call_load(s, base, (uint32_t)d->SizeOfImage, name);
         else if (reason == 2 && s.on_unload) call_unload(s, base);
         ldr_leave();
+        QueryPerformanceCounter(&b);
+        double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+        if (ms > slow_ms) { slow_ms = ms; slow = s.row; }
     }
+    // Spell-start pause (U 12/10/2026, ~5 s at some casts): how long our callbacks hold the loader thread per load
+    double total = (b.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+    if (n > 0)
+        log_line("magic_mods: %s %s: %ld callbacks %.2f ms (slowest %s %.2f ms), thread %lu", name,
+                 reason == 1 ? "load" : "unload", n, total, slow, slow_ms, GetCurrentThreadId());
 }
 
 // Init thread (row install). Subscribers added after a load see only later loads.
