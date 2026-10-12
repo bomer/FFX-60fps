@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -27,8 +27,9 @@ static Row* g_rows[] = {
     &row_TITLE001,                               // rows/X2-TITLE-001.cpp
     &row_SMOOTH001,                              // rows/X2-SMOOTH-001.cpp (60 Hz promotion)
     &row_SMOOTH002,                              // rows/X2-SMOOTH-002.cpp (60 Hz promotion)
-    &row_DIAGRATE,
-    &row_DIAGDRAWSTEP,                           // rows/X2-DIAG-DRAWSTEP.cpp (diagnostic, default 0)                               // rows/X2-DIAG-RATE.cpp (diagnostic, default 0)
+    &row_DIAGRATE,                               // rows/X2-DIAG-RATE.cpp (diagnostic, default 0)
+    &row_DIAGDRAWSTEP,                           // rows/X2-DIAG-DRAWSTEP.cpp (diagnostic, default 0)
+    &row_DEVBISECT,                              // rows/X2-DEV-BISECT.cpp (test tool, F8; must stay last)
     nullptr
 };
 
