@@ -643,7 +643,62 @@ static void __cdecl h_noskel() {
 }
 
 // ---------------------------------------------------------------- per invocation
+// ---------------------------------------------------------------- SMOOTH-003-CLOTHHOLD (default 1)
+// Ch_ClothSimulate 0x822DE0 (void cdecl(actor), plain RET 0x8245CF; only caller the cloth job FUN_0082e390, worker
+// thread) is position Verlet with a fixed step and no dt. A walked actor has 0x1000 cleared on render-only frames,
+// so its cloth job ran twice per tick: hair and cloth swung 2x and vibrated (U 12/10/2026: Kimahri's hair). On those
+// frames the step returns at once; the cloth mesh matrix is rebuilt per Ch_DrawMain call (FUN_008314c0), so held
+// cloth follows the half-stepped bones. re/ledger/SMOOTH-CLOTH.md.
+// Mode 1 still vibrated (U 12/10/2026): the pinned rows follow the half-stepped bones while the free rows hold.
+// Mode 2 skips the whole cloth job FUN_0082e390 (cdecl (actor**, int* count), plain RET; attach FUN_00832110, sim,
+// deform FUN_0082dbc0) for walked actors: the cloth mesh keeps its tick shape, rigid to its root bone.
+static int g_clothhold = 2;
+static uint8_t* g_cjob_fn = nullptr;
+static void (__cdecl* g_cjob_tramp)(uint8_t**, int*) = nullptr;
+static uint8_t* g_cloth_fn = nullptr;
+static void (__cdecl* g_cloth_tramp)(uint8_t*) = nullptr;
+static bool g_cloth_hooked = false;
+static volatile LONG g_cloth_held = 0;
+
+static void __cdecl h_cloth(uint8_t* a) {
+    if (g_walked_inv && !g_disabled) {
+        int i = slot_of(a, *g_table, *g_count);
+        if (i >= 0 && g_walked[i]) {
+            if (InterlockedIncrement(&g_cloth_held) == 1) log_line("SMOOTH-003-CLOTHHOLD: first cloth step held on a render-only frame (id 0x%04X)", *(uint16_t*)a);
+            return;
+        }
+    }
+    g_cloth_tramp(a);
+}
+
+static void __cdecl h_cjob(uint8_t** list, int* count) {
+    if (g_walked_inv && !g_disabled) {
+        bool all = true;
+        __try {
+            for (int k = 0; k < *count && all; k++) {
+                int i = slot_of(list[k], *g_table, *g_count);
+                all = i >= 0 && g_walked[i];
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { all = false; }
+        if (all) {
+            if (InterlockedIncrement(&g_cloth_held) == 1) log_line("SMOOTH-003-CLOTHHOLD: first cloth job skipped on a render-only frame (mode 2)");
+            return;
+        }
+    }
+    g_cjob_tramp(list, count);
+}
+
 static void pre() {
+    if (g_clothhold && !g_cloth_hooked) {
+        g_cloth_hooked = true;
+        if (g_clothhold == 2) {
+            if (hook_entry("SMOOTH-003-CLOTHHOLD", g_cjob_fn, (void*)&h_cjob, (void**)&g_cjob_tramp))
+                log_line("SMOOTH-003-CLOTHHOLD: cloth job gva 0x%08X hooked: whole job once per logic tick (mode 2)", rt_to_gva_exe(g_cjob_fn));
+            else g_clothhold = 0;
+        } else if (hook_entry("SMOOTH-003-CLOTHHOLD", g_cloth_fn, (void*)&h_cloth, (void**)&g_cloth_tramp))
+            log_line("SMOOTH-003-CLOTHHOLD: Ch_ClothSimulate gva 0x%08X hooked: cloth steps once per logic tick", rt_to_gva_exe(g_cloth_fn));
+        else g_clothhold = 0;
+    }
     smooth_poll_hotkey();
     if (g_hold_base) {
         __try { hold_restore(); }
@@ -748,6 +803,24 @@ static bool install() {
     g_hold = config_row("SMOOTH-003-HOLD", 1);
     g_blend = config_row("SMOOTH-003-BLEND", 0);
     g_cloth = config_row("SMOOTH-003-CLOTH", 0);
+    g_clothhold = config_row("SMOOTH-003-CLOTHHOLD", 2);
+    if (g_clothhold) {
+        // entry through MOV EAX,[EDI+0x194]; TEST EAX,0x200000 (cloth actor bit)
+        g_cloth_fn = sig_find_unique("SMOOTH-003-CLOTHHOLD Ch_ClothSimulate",
+            "55 8B EC 81 EC AC 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 57 8B 7D 08 89 BD C8 FD FF FF 8B 87 94 01 00 00 A9 00 00 20 00",
+            0x822DE0);
+        if (!g_cloth_fn) { g_clothhold = 0; log_line("  SMOOTH-003-CLOTHHOLD: Ch_ClothSimulate not found - off"); }
+    }
+    if (g_clothhold == 2) {
+        // FUN_0082e390: loop over count actors: CALL attach; CALL Ch_ClothSimulate; ADD ESP,0xC
+        g_cjob_fn = sig_find_unique("SMOOTH-003-CLOTHHOLD cloth job (FUN_0082e390)",
+            "55 8B EC 53 8B 5D 0C 56 33 F6 39 33 7E ?? 57 90 8B 45 08 6A 00 8B 3C B0 57 E8 ?? ?? ?? ?? 57 E8 ?? ?? ?? ?? 83 C4 0C",
+            0x82E390);
+        if (!g_cjob_fn || call_target(g_cjob_fn + 0x1F) != g_cloth_fn) {
+            g_clothhold = 0;
+            log_line("  SMOOTH-003-CLOTHHOLD: cloth job not found or does not call Ch_ClothSimulate - off");
+        }
+    }
     g_diag = config_row("SMOOTH-003-DIAG", 0);
     g_diag_id = config_row("SMOOTH-003-DIAG-ID", 0);
     g_diag_id_end = config_row("SMOOTH-003-DIAG-ID-END", 0);
