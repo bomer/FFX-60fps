@@ -32,6 +32,8 @@ static int  g_gates = 1, g_hold = 1, g_blend = 0, g_cloth = 0, g_diag = 0, g_loo
 static int  g_diag_id = 0;                       // SMOOTH-003-DIAG-ID: log every walk of this actor id (decimal)
 static int  g_diag_id_end = 0;                   // SMOOTH-003-DIAG-ID-END: with DIAG-ID, an inclusive id range
 static LONG g_kd_lines = 0;
+static int  g_ring = 1;                          // SMOOTH-003-DIAG-RING: DIAG-ID lines go to the memory ring (Num 3 dumps)
+#define DLOG(...) (g_ring ? log_ring(__VA_ARGS__) : log_line(__VA_ARGS__))
 static bool diag_id_match(uint16_t id) { return g_diag_id && id >= (uint16_t)g_diag_id && id <= (uint16_t)(g_diag_id_end ? g_diag_id_end : g_diag_id); }
 static LONG g_diag_id_lines = 0;
 static int  g_kind = INV_STOCK;
@@ -223,16 +225,16 @@ static bool keyhold(int i, uint8_t* a, int nb) {
             int16_t pv = *(const int16_t*)(node + 0x18), vv = *(const int16_t*)(node + 0x16);
             int dl = vv - pv; if (dl < 0) dl = -dl;
             if (diag_id_match(*(const uint16_t*)a) && (dl > 0x400 || ((pv ^ vv) < 0 && dl > 0x80)) &&
-                InterlockedIncrement(&g_kd_lines) <= 4000)
-                log_line("SMOOTH-003 keydiag: slot=%d id=0x%04X bone %d ch %d LINEAR keys %d -> %d clock 0x%X out %.3f/%.3f",
+                (g_ring || InterlockedIncrement(&g_kd_lines) <= 4000))
+                DLOG("SMOOTH-003 keydiag: slot=%d id=0x%04X bone %d ch %d LINEAR keys %d -> %d clock 0x%X out %.3f/%.3f",
                          i, *(const uint16_t*)a, (int)((node - pose) / POSE_STRIDE), (int)(((node - pose) % POSE_STRIDE) / NODE_SIZE),
                          pv, vv, *(const uint32_t*)(a + SAMPLE_CLOCK), *(const float*)(node + 0x1C), *(const float*)(node + 0x20));
             continue;
         }
         int d = (int)(uint16_t)(*(const int16_t*)(node + 0x16) - *(const int16_t*)(node + 0x18)) & 0xFFF;
         if (d > 0x800) d = 0x1000 - d;
-        if (d > 0x100 && diag_id_match(*(const uint16_t*)a) && InterlockedIncrement(&g_kd_lines) <= 4000)
-            log_line("SMOOTH-003 keydiag: slot=%d id=0x%04X bone %d ch %d keys %d -> %d d 0x%X clock 0x%X %s", i, *(const uint16_t*)a,
+        if (d > 0x100 && diag_id_match(*(const uint16_t*)a) && (g_ring || InterlockedIncrement(&g_kd_lines) <= 4000))
+            DLOG("SMOOTH-003 keydiag: slot=%d id=0x%04X bone %d ch %d keys %d -> %d d 0x%X clock 0x%X %s", i, *(const uint16_t*)a,
                      (int)((node - pose) / POSE_STRIDE), (int)(((node - pose) % POSE_STRIDE) / NODE_SIZE),
                      *(const int16_t*)(node + 0x18), *(const int16_t*)(node + 0x16), d, *(const uint32_t*)(a + SAMPLE_CLOCK),
                      d > KEYHOLD_D ? "HELD" : "passed");
@@ -296,9 +298,9 @@ static void out_diag(int i, uint8_t* a, int nb) {
                                 *(const float*)(g_bone_save + b * BONE_STRIDE + BANG[c]) * INV_2PI);
             if (d > worst) { worst = d; wc = c; }
         }
-        if (worst <= 0.08f || InterlockedIncrement(&g_outdiag_lines) > 4000) continue;
+        if (worst <= 0.08f || (!g_ring && InterlockedIncrement(&g_outdiag_lines) > 4000)) continue;
         const uint8_t* n0 = pose + (size_t)pe * POSE_STRIDE;
-        log_line("SMOOTH-003 outdiag: slot=%d id=0x%04X pose %d bone %d ch %d off %.3f turn from tick k; clock 0x%X; keys x %d->%d y %d->%d z %d->%d",
+        DLOG("SMOOTH-003 outdiag: slot=%d id=0x%04X pose %d bone %d ch %d off %.3f turn from tick k; clock 0x%X; keys x %d->%d y %d->%d z %d->%d",
                  i, *(const uint16_t*)a, pe, b, wc, worst, *(const uint32_t*)(a + SAMPLE_CLOCK),
                  *(const int16_t*)(n0 + 0x18), *(const int16_t*)(n0 + 0x16),
                  *(const int16_t*)(n0 + NODE_SIZE + 0x18), *(const int16_t*)(n0 + NODE_SIZE + 0x16),
@@ -487,14 +489,14 @@ static void diag_actor(int i, const uint8_t* a, int32_t c0, int32_t cs, int32_t 
     if (g_diag_id) {
         if (!diag_id_match(*(const uint16_t*)a)) return;
         ev = InterlockedIncrement(&g_diag_events);
-        if (InterlockedIncrement(&g_diag_id_lines) > 20000) return;
+        if (!g_ring && InterlockedIncrement(&g_diag_id_lines) > 20000) return;
     } else {
         if (!(kind || rewind || blend > 1 || m1 || child)) return;
         ev = InterlockedIncrement(&g_diag_events);
         if (g_diag_lines >= 300 && (ev % 200) != 0) return;
         InterlockedIncrement(&g_diag_lines);
     }
-    log_line("SMOOTH-003 diag: slot=%d id=0x%04X clock %d (f%d+%02X) sample %d -> %d start=%d end=%d len=%d loops=%d "
+    DLOG("SMOOTH-003 diag: slot=%d id=0x%04X clock %d (f%d+%02X) sample %d -> %d start=%d end=%d len=%d loops=%d "
              "done %d->%d%s guard=%s blend=%d mode1=%d parent=%08X fl=%08X seq=%08X ev=%ld",
              i, *(const uint16_t*)a, c0, c0 >> 8, c0 & 0xFF, cs, c1, *(const int32_t*)(a + M_START),
              *(const int32_t*)(a + M_END), *(const int32_t*)(a + M_LEN), (int)*(const int16_t*)(a + M_LOOPS), done0, done1,
@@ -518,8 +520,8 @@ static bool walk_step(int i, uint8_t* a, uint32_t fl) {
         if (!safe_step(a, 0)) return false;               // clock only: pose stays at tick k
         InterlockedIncrement(&g_loopend_holds);
         if (g_endextrap) __try { end_extrapolate(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        if (diag_id_match(*(const uint16_t*)a) && InterlockedIncrement(&g_kd_lines) <= 4000)
-            log_line("SMOOTH-003 diag: slot=%d id=0x%04X LOOPEND hold: clock %d (f%d+%02X) sample %d start=%d end=%d len=%d loops=%d",
+        if (diag_id_match(*(const uint16_t*)a) && (g_ring || InterlockedIncrement(&g_kd_lines) <= 4000))
+            DLOG("SMOOTH-003 diag: slot=%d id=0x%04X LOOPEND hold: clock %d (f%d+%02X) sample %d start=%d end=%d len=%d loops=%d",
                      i, *(const uint16_t*)a, c0, c0 >> 8, c0 & 0xFF, cs, *(const int32_t*)(a + M_START),
                      *(const int32_t*)(a + M_END), *(const int32_t*)(a + M_LEN), (int)*(const int16_t*)(a + M_LOOPS));
         return true;
@@ -824,6 +826,13 @@ static void cloth_hotkey() {
 static void pre() {
 #ifdef FPS60_DEV
     cloth_hotkey();
+    // Dev hotkey Num 3 (no Ctrl; Ctrl+Num 3 is LAB-001): the DIAG-ID ring (last ~30 s of the watched actors) goes
+    // to the log, marked, e.g. right after a glitch is seen.
+    static bool prev3 = false;
+    if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000) && dev_key(VK_NUMPAD3, &prev3)) {
+        if (g_diag_id && g_ring) log_ring_dump("Num3 MARK (SMOOTH-003 DIAG-ID ring)");
+        else log_line("Num3: no SMOOTH-003 DIAG-ID ring (needs SMOOTH-003-DIAG=2, -DIAG-ID, -DIAG-RING=1)");
+    }
 #endif
     if (g_clothhold && !g_cloth_hooked) {
         g_cloth_hooked = true;
@@ -974,6 +983,7 @@ static bool install() {
     }
     g_diag = config_row("SMOOTH-003-DIAG", 0);
     g_diag_id = config_row("SMOOTH-003-DIAG-ID", 0);
+    g_ring = config_row("SMOOTH-003-DIAG-RING", 1);
     g_diag_id_end = config_row("SMOOTH-003-DIAG-ID-END", 0);
     g_loopguard = config_row("SMOOTH-003-LOOPGUARD", 1);
     g_shortloop = config_row("SMOOTH-003-SHORTLOOP", 1);

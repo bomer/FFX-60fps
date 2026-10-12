@@ -94,6 +94,50 @@ void log_close() {
     LeaveCriticalSection(&g_log_cs);
 }
 
+// Memory ring for high-rate diagnostics (SMOOTH-003 DIAG-ID): lines are kept, not written, until log_ring_dump
+// (dev hotkey Num 3 when the glitch is seen), so the frames before it are in the log too.
+enum { RING_N = 8192, RING_W = 240 };
+static char  g_ring[RING_N][RING_W];
+static LONG  g_ring_pos = 0;
+static CRITICAL_SECTION g_ring_cs;
+static bool  g_ring_init = false;
+
+void log_ring(const char* fmt, ...) {
+    if (!g_log_init) return;
+    if (!g_ring_init) { InitializeCriticalSection(&g_ring_cs); g_ring_init = true; }   // first use: game thread
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char msg[RING_W];
+    int k = snprintf(msg, sizeof(msg), "%02u:%02u:%02u.%03u | ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    va_list args;
+    va_start(args, fmt);
+    if (k > 0 && k < (int)sizeof(msg)) vsnprintf(msg + k, sizeof(msg) - k, fmt, args);
+    va_end(args);
+    EnterCriticalSection(&g_ring_cs);
+    memcpy(g_ring[g_ring_pos % RING_N], msg, sizeof(msg));
+    g_ring_pos++;
+    LeaveCriticalSection(&g_ring_cs);
+}
+
+void log_ring_dump(const char* why) {
+    if (!g_ring_init) { log_line("%s: ring empty", why); return; }
+    EnterCriticalSection(&g_ring_cs);
+    LONG n = g_ring_pos < RING_N ? g_ring_pos : RING_N, first = g_ring_pos - n;
+    log_line("==== %s: last %ld ring lines (oldest first) ====", why, n);
+    EnterCriticalSection(&g_log_cs);
+    for (LONG i = 0; i < n && g_log != INVALID_HANDLE_VALUE; i++) {
+        const char* m = g_ring[(first + i) % RING_N];
+        DWORD w;
+        WriteFile(g_log, "  ring ", 7, &w, nullptr);
+        WriteFile(g_log, m, (DWORD)strnlen(m, RING_W), &w, nullptr);
+        WriteFile(g_log, "\r\n", 2, &w, nullptr);
+    }
+    LeaveCriticalSection(&g_log_cs);
+    g_ring_pos = 0;
+    LeaveCriticalSection(&g_ring_cs);
+    log_line("==== %s: end of ring ====", why);
+}
+
 void log_line(const char* fmt, ...) {
     if (!g_log_init) return;
     va_list args;
