@@ -435,7 +435,7 @@ static PSnap* psnap_find(uint8_t* p, bool create) {
         if (!stale && (!e->p || e->ncur < g_fx_n - 2)) stale = e;
     }
     if (!create || !stale) return nullptr;
-    stale->p = p; stale->ncur = stale->nprev = 0;
+    stale->p = p; stale->ncur = g_fx_n; stale->nprev = 0;     // stamped: not "stale" again in this step
     return stale;
 }
 

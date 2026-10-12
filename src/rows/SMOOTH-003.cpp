@@ -687,14 +687,21 @@ enum { NSNAP = 128 };
 static ClothSnap g_snap[NSNAP];
 static SRWLOCK g_snap_lock = SRWLOCK_INIT;
 
+// Jobs run on several worker threads at once. A new entry is stamped with the current step (crash 12/10/2026,
+// heap corruption 0xC0000374 right after a hot reload in battle: a fresh entry had ncur 0, so a second job creating
+// its own entry took it as the oldest and freed the first job's buffers mid-copy). Only empty slots or entries
+// unused for 4+ logic steps are taken; with none left the mesh is not snapshotted (its frames hold).
 static ClothSnap* snap_get(float* vtex, uint8_t* actor, uint32_t n, bool create) {
     AcquireSRWLockExclusive(&g_snap_lock);
-    ClothSnap* s = nullptr; ClothSnap* old = &g_snap[0];
+    ClothSnap* s = nullptr; ClothSnap* old = nullptr;
+    LONG now = g_step_n;
     for (int i = 0; i < NSNAP; i++) {
-        if (g_snap[i].vtex == vtex) { s = &g_snap[i]; break; }
-        if (g_snap[i].ncur < old->ncur) old = &g_snap[i];
+        ClothSnap* e = &g_snap[i];
+        if (e->vtex == vtex) { s = e; break; }
+        if (!e->vtex) { if (!old || old->vtex) old = e; }
+        else if (e->ncur < now - 4 && (!old || (old->vtex && e->ncur < old->ncur))) old = e;
     }
-    if (!s && create) { s = old; s->vtex = vtex; s->ncur = s->nprev = 0; }
+    if (!s && create && old) { s = old; s->vtex = vtex; s->ncur = now; s->nprev = 0; s->actor = nullptr; }
     if (s && create && (s->n != n || s->actor != actor)) {
         free(s->cur); free(s->prev);
         s->cur = (float*)malloc(n * 16); s->prev = (float*)malloc(n * 16);
