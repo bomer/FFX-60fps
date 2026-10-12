@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{A0D5AEB1-BE4F-43A1-882A-6143F3DEB9F4}</ProjectGuid>
+    <RootNamespace>x2</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>x2</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <!-- FFX-2 mod DLL: the shared loader loads it when the host is FFX-2.exe. Links nothing from the FFX mod. -->
+    <TargetName>fps60_ffx2</TargetName>
+    <OutDir>$(MSBuildThisFileDirectory)artifacts\x2\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\x2\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <!-- Dev build (msbuild /p:Fps60Dev=1): FPS60_DEV compiles in hot reload and the bisect hotkeys. Separate output
+       folders, so a release build (artifacts\Release, what tools/pack_dist.py packs) never contains them. -->
+  <PropertyGroup Condition="'$(Fps60Dev)'=='1'">
+    <OutDir>$(MSBuildThisFileDirectory)artifacts\x2\Dev$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\x2\Dev$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Fps60Dev)'=='1'">
+    <ClCompile>
+      <PreprocessorDefinitions>FPS60_DEV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\x2\x2_main.cpp" />
+    <ClCompile Include="src\x2\x2_log.cpp" />
+    <ClCompile Include="src\x2\x2_config.cpp" />
+    <ClCompile Include="src\x2\x2_sigs.cpp" />
+    <ClCompile Include="src\x2\x2_hooks.cpp" />
+    <ClCompile Include="src\x2\x2_pacing.cpp" />
+    <ClCompile Include="src\x2\x2_rows.cpp" />
+    <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+    <ClCompile Include="third_party\minhook\src\hook.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+    <ClCompile Include="third_party\minhook\src\trampoline.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+    <ClCompile Include="third_party\minhook\src\hde\hde32.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\x2\x2.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>
