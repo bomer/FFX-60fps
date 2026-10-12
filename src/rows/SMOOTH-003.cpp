@@ -802,25 +802,22 @@ static void __cdecl h_cjob(uint8_t** list, int* count) {
     __except (EXCEPTION_EXECUTE_HANDLER) { on_fault("SMOOTH-003 cloth snap", GetExceptionCode()); }
 }
 
-// Test hotkey F5 (game window in front): cycle the job-hook modes 4 -> 3 -> 2 -> 0 (stock, cloth 2x) -> 4.
+// Dev hotkey Num 5 (FPS60_DEV builds): cycle the job-hook modes 4 -> 3 -> 2 -> 0 (stock, cloth 2x) -> 4.
+#ifdef FPS60_DEV
 static void cloth_hotkey() {
     static bool prev = false;
-    bool down = (GetAsyncKeyState(VK_F5) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000);   // Ctrl+F5 is DEV-STOCK
-    bool edge = down && !prev;
-    prev = down;
-    if (!edge || !g_cjob_tramp) return;
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    if (fg) GetWindowThreadProcessId(fg, &pid);
-    if (pid != GetCurrentProcessId()) return;
+    if (!dev_key(VK_NUMPAD5, &prev) || !g_cjob_tramp) return;
     int m = g_clothhold == 4 ? 3 : g_clothhold == 3 ? 2 : g_clothhold == 2 ? 0 : 4;
     if (m >= 3 && !g_deform) m = m == 4 ? 2 : 0;
     g_clothhold = m;
-    log_line("F5: SMOOTH-003-CLOTHHOLD mode %d (%s)", m, m == 4 ? "interpolated" : m == 3 ? "extrapolated" : m == 2 ? "held, 30 Hz" : "stock, cloth 2x");
+    log_line("Num5: SMOOTH-003-CLOTHHOLD mode %d (%s)", m, m == 4 ? "interpolated" : m == 3 ? "extrapolated" : m == 2 ? "held, 30 Hz" : "stock, cloth 2x");
 }
+#endif
 
 static void pre() {
+#ifdef FPS60_DEV
     cloth_hotkey();
+#endif
     if (g_clothhold && !g_cloth_hooked) {
         g_cloth_hooked = true;
         if (g_clothhold >= 2) {
@@ -1009,8 +1006,17 @@ static bool install() {
     return true;
 }
 
+// Dev hot reload: put held poses back and leave the engine's half-rate switch off.
+static void stop() {
+    __try { hold_restore(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (g_half) *g_half = 0;
+    g_half_on = false;
+    g_walked_inv = false;
+    memset(g_walked, 0, sizeof(g_walked));
+}
+
 Row row_SMOOTH003 = {
     "SMOOTH-003",
     "60 Hz limbs: engine half-rate motion + a half step on render-only frames (needs master SMOOTH=1)",
-    1, install, pre, post, 0
+    1, install, pre, post, 0, stop
 };

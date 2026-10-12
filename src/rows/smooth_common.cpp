@@ -21,19 +21,21 @@ static bool focused() {
 // F7 (game window focused): SMOOTH rows on/off at runtime, for an A/B look in the same scene.
 // Several SMOOTH rows call this; the static edge state makes the extra calls no-ops.
 void smooth_poll_hotkey() {
+#ifdef FPS60_DEV
+    // Dev hotkey Num 2 bisects: SMOOTH-001 off -> SMOOTH-002 off -> SMOOTH-003 off -> none (U 12/10/2026: one-frame
+    // boss ghost in the Echuilles battle, gone with F7).
+    static bool prev2 = false;
+    if (dev_key(VK_NUMPAD2, &prev2)) {
+        g_off_row = (g_off_row + 1) % 4;
+        if (g_off_row) log_line("Num2: only SMOOTH-00%ld off (others %s)", g_off_row, g_live ? "on" : "off by F7");
+        else log_line("Num2: all SMOOTH rows follow F7 (%s)", g_live ? "on" : "off");
+    }
+#endif
     static bool prev = false;
     bool down = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
     bool edge = down && !prev;
     prev = down;
     if (!edge || !focused()) return;
-    // Ctrl+F7 bisects: SMOOTH-001 off -> SMOOTH-002 off -> SMOOTH-003 off -> none (U 12/10/2026: one-frame boss
-    // ghost in the Echuilles battle, gone with F7).
-    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
-        g_off_row = (g_off_row + 1) % 4;
-        if (g_off_row) log_line("Ctrl+F7: only SMOOTH-00%ld off (others %s)", g_off_row, g_live ? "on" : "off by F7");
-        else log_line("Ctrl+F7: all SMOOTH rows follow F7 (%s)", g_live ? "on" : "off");
-        return;
-    }
     g_live = g_live ? 0 : 1;
     log_line("F7: SMOOTH rows %s", g_live ? "ON" : "OFF (installed, pass-through)");
 }

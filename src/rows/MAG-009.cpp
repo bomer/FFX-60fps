@@ -39,12 +39,8 @@ static bool install() {
     g_getter_orig = (fc_getter_t)getter;
     g_logic_fc = (int32_t)*g_frame_counter;
 
-    DWORD old;
-    if (!VirtualProtect(table + 0x3D4, 0xBF0 - 0x3D4 + 4, PAGE_READWRITE, &old)) return false;
-    InterlockedExchange((volatile LONG*)slot_ptr, (LONG)(uintptr_t)&g_logic_fc);
-    InterlockedExchange((volatile LONG*)slot_get, (LONG)(uintptr_t)&h_fc_getter);
-    DWORD tmp;
-    VirtualProtect(table + 0x3D4, 0xBF0 - 0x3D4 + 4, old, &tmp);
+    uint32_t vp = (uint32_t)(uintptr_t)&g_logic_fc, vg = (uint32_t)(uintptr_t)&h_fc_getter;
+    if (!patch_write((void*)slot_ptr, &vp, 4) || !patch_write((void*)slot_get, &vg, 4)) return false;
     log_line("  MAG-009: service table gva=0x%08X: +0xBF0 -> logic counter %p, +0x3D4 getter gva=0x%08X -> stub",
              rt_to_gva_exe(table), (void*)&g_logic_fc, rt_to_gva_exe(getter));
     return true;

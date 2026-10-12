@@ -37,6 +37,9 @@ static void CALLBACK dll_notif(ULONG reason, const MM_LDR_NOTIF_DATA* d, PVOID) 
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return; }
     if (_strnicmp(name, "magic_", 6) != 0) return;
+    // A copy switched off by a dev hot reload (or a fault) hooks no new loads; unloads still let its rows free
+    // the hooks they made in DLLs loaded before.
+    if (g_disabled && reason == 1) return;
 
     uint8_t* base = (uint8_t*)d->DllBase;
     LONG n = g_nsubs;

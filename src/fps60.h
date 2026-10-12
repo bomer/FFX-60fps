@@ -115,6 +115,7 @@ struct Row {
     void (*pre)();               // optional
     void (*post)();              // optional
     int         on;              // resolved: ini toggle && install ok
+    void (*stop)();              // optional: undo state held between invocations (dev hot reload, reload.cpp)
 };
 extern Row row_MAG008;                           // rows/MAG-008.cpp
 extern Row row_MAG006;                           // rows/MAG-006.cpp
@@ -168,6 +169,7 @@ int   famE_find_setter(uint8_t* mod, uint32_t size, uint8_t** hit); // MAG-018: 
 void rows_install_all();
 bool row_on(const char* id);                     // false = that row is turned off (rollback skips its spans)
 void rows_pre();
+void rows_stop_all();                           // dev hot reload: Row::stop of every row that is on
 void rows_post();
 int        rows_count();
 const Row* row_at(int i);
@@ -210,6 +212,18 @@ bool  safe_copy(void* dst, const void* src, size_t n);
 bool  hook_init();                                // once, before the first hook_entry (init thread)
 bool  hook_entry(const char* name, void* target, void* detour, void** orig);  // create + enable; logs failures
 bool  hook_remove(const char* name, void* target);  // disable + free the trampoline (module unload)
+void  hook_disable_all();                         // MH_DisableHook(MH_ALL_HOOKS): originals back (dev hot reload)
+// Byte patches of game code or tables: every write goes through patch_write, which keeps the original bytes so
+// patch_revert_all can put them back (dev hot reload). n <= 16; an aligned 4-byte write is atomic.
+bool  patch_write(void* at, const void* bytes, size_t n);
+void  patch_revert_all();
+void  pacing_shutdown();                          // pacing.cpp: hand the game its own divider/exec back
+void  log_close();                                // log.cpp
+#ifdef FPS60_DEV
+// Dev build only (FPS60_DEV): edge of a key press while the game window is focused. `prev` keeps the key state.
+bool  dev_key(int vk, bool* prev);
+void  reload_poll();                              // reload.cpp: Num 9 = load fps60_next.dll in place of this copy
+#endif
 // ---------------------------------------------------------------- magic overlay loads (magic_mods.cpp)
 // Callbacks run under the loader lock, for magic_*.dll only. At unload the image is still mapped.
 typedef void (*magic_load_fn)(uint8_t* base, uint32_t size, const char* name);

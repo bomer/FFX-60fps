@@ -138,12 +138,8 @@ static bool install() {
     if (at) {
         uint32_t* slot = (uint32_t*)((uint8_t*)read_abs(at + 0x0A) + 0x358);
         if (*slot == (uint32_t)(uintptr_t)fn) {
-            DWORD old, tmp;
-            if (VirtualProtect(slot, 4, PAGE_READWRITE, &old)) {
-                InterlockedExchange((volatile LONG*)slot, (LONG)(uintptr_t)&h_signal);
-                VirtualProtect(slot, 4, old, &tmp);
-                ok++;
-            }
+            uint32_t v = (uint32_t)(uintptr_t)&h_signal;
+            if (patch_write(slot, &v, 4)) ok++;
         } else {
             log_line("  DIAG-BTLSIG: table+0x358 = 0x%08X, not FUN_00788920 - slot skipped", *slot);
         }

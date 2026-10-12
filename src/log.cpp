@@ -29,6 +29,13 @@ void log_open() {
     wchar_t path[MAX_PATH];
     game_dir(path, MAX_PATH);
     if (!path[0] || lstrlenW(path) > MAX_PATH - 20) return;
+    // Dev hot reload (reload.cpp sets FPS60_HOT): the previous copy closed the log; continue the same file.
+    if (GetEnvironmentVariableW(L"FPS60_HOT", nullptr, 0)) {
+        lstrcatW(path, L"fps60.log");
+        g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (g_log != INVALID_HANDLE_VALUE) SetFilePointer(g_log, 0, nullptr, FILE_END);
+        return;
+    }
     // Keep the previous 5 sessions: fps60.log -> fps60.1.log -> ... -> fps60.5.log (10/10/2026: a
     // stock reference run was lost when the next start truncated the log).
     int dir_len = lstrlenW(path);
@@ -67,6 +74,24 @@ static bool log_write(bool try_only, const char* fmt, va_list args) {
     LeaveCriticalSection(&g_log_cs);
     if (!try_only) OutputDebugStringA(line);
     return true;
+}
+
+// Dev hot reload: a failed load gives the log back to the passive copy.
+void log_reopen() {
+    if (!g_log_init || g_log != INVALID_HANDLE_VALUE) return;
+    wchar_t path[MAX_PATH];
+    game_dir(path, MAX_PATH);
+    if (!path[0] || lstrlenW(path) > MAX_PATH - 20) return;
+    lstrcatW(path, L"fps60.log");
+    g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (g_log != INVALID_HANDLE_VALUE) SetFilePointer(g_log, 0, nullptr, FILE_END);
+}
+
+void log_close() {
+    if (!g_log_init) return;
+    EnterCriticalSection(&g_log_cs);
+    if (g_log != INVALID_HANDLE_VALUE) { CloseHandle(g_log); g_log = INVALID_HANDLE_VALUE; }
+    LeaveCriticalSection(&g_log_cs);
 }
 
 void log_line(const char* fmt, ...) {

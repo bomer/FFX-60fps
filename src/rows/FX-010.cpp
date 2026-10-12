@@ -414,7 +414,7 @@ static void rb_restore() {
 // the last two snapshots of the same particle (age grew) and holds a float in a sane range in both is moved half a
 // tick ahead (cur + k * (cur - prev)); words that changed sign are held, a result that would cross zero is clamped
 // to 0 (fades, colours). The paused
-// step draws from that, then the words are put back. F3 toggles it in game.
+// step draws from that, then the words are put back. Num 7 toggles it in game (dev builds).
 static int  g_extrap = 0, g_extrap_pct = 50;
 static LONG g_fx_n = 1;                          // unpaused (logic) invocations; main thread only
 static LONG g_ex_parts = 0, g_ex_words = 0, g_ex_lines = 0;
@@ -656,12 +656,10 @@ static bool drawcam_find() {
 }
 
 static bool nop_bytes(uint8_t* at, const char* expect, int n) {
-    DWORD old;
-    if (!sig_match(at, expect) || !VirtualProtect(at, n, PAGE_EXECUTE_READWRITE, &old)) return false;
-    memset(at, 0x90, n);
-    VirtualProtect(at, n, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), at, n);
-    return true;
+    uint8_t nops[16];
+    if (n > 16 || !sig_match(at, expect)) return false;
+    memset(nops, 0x90, n);
+    return patch_write(at, nops, n);
 }
 
 // FX-010-UNGATE=<hex VA>[,<hex VA>...] (test switch): NOP these JNEs, each the jump of a pause-flag gate (a
@@ -717,11 +715,8 @@ static bool drawcam_patch() {
             patch_call_rel32(m + 0x1C, k_dc_spawn_stub[i], sp);
             return false;
         }
-        DWORD old;
-        if (m[7] != 0x75 || m[8] != 0x30 || !VirtualProtect(m + 7, 2, PAGE_EXECUTE_READWRITE, &old)) return false;
-        m[7] = 0x90; m[8] = 0x90;
-        VirtualProtect(m + 7, 2, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), m + 7, 2);
+        static const uint8_t nop2[2] = { 0x90, 0x90 };
+        if (m[7] != 0x75 || m[8] != 0x30 || !patch_write(m + 7, nop2, 2)) return false;
         log_line("FX-010-DRAWOPS: draw op gate gva=0x%08X NOPed; spawn 0x%08X / integrate 0x%08X skipped while paused",
                  rt_to_gva_exe(m), rt_to_gva_exe(sp), rt_to_gva_exe(ig));
     }
@@ -749,7 +744,7 @@ static bool install() {
     g_extrap = config_row("FX-010-EXTRAP", 0);
     g_extrap_pct = config_row("FX-010-EXTRAP-PCT", 50);
     g_psnap = (PSnap*)calloc(PS_N, sizeof(PSnap));
-    log_line("  FX-010-EXTRAP: %s (%d%% of a tick, F3 toggles)", g_extrap ? "on" : "off", g_extrap_pct);
+    log_line("  FX-010-EXTRAP: %s (%d%% of a tick)", g_extrap ? "on" : "off", g_extrap_pct);
     if (g_rollback) log_line("  FX-010: FX-010-ROLLBACK on: paused steps of selected programs leave their records unchanged");
     g_loopdefer = config_row("FX-010-LOOPDEFER", 1) != 0;
     if (g_loopdefer) {
@@ -801,23 +796,20 @@ static bool install() {
     return true;
 }
 
-static void ex_hotkey() {
+#ifdef FPS60_DEV
+static void ex_hotkey() {                        // dev hotkey Num 7
     static bool prev = false;
-    bool down = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
-    bool edge = down && !prev;
-    prev = down;
-    if (!edge || !g_psnap) return;
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    if (fg) GetWindowThreadProcessId(fg, &pid);
-    if (pid != GetCurrentProcessId()) return;
+    if (!dev_key(VK_NUMPAD7, &prev) || !g_psnap) return;
     g_extrap = !g_extrap;
-    log_line("F3: FX-010-EXTRAP=%d (particles moved %d%% of a tick ahead on paused frames)", g_extrap, g_extrap_pct);
+    log_line("Num7: FX-010-EXTRAP=%d (particles moved %d%% of a tick ahead on paused frames)", g_extrap, g_extrap_pct);
 }
+#endif
 
 static void pre() {
     if (pacing_kind() != INV_BUILD) g_fx_n++;
+#ifdef FPS60_DEV
     ex_hotkey();
+#endif
     if (g_extrap && g_ex_parts - g_ex_lines >= 20000) {
         g_ex_lines = g_ex_parts;
         log_line("FX-010-EXTRAP: %ld particle draws extrapolated, %ld words", g_ex_parts, g_ex_words);

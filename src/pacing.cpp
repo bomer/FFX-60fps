@@ -88,6 +88,17 @@ void pacing_pre() {
     g_active = g_was_active = true;
 }
 
+// Dev hot reload: the game gets its own divider and exec back before this copy goes passive.
+void pacing_shutdown() {
+    if (g_was_active) {
+        set_divider(g_wanted ? g_wanted : 2);
+        set_exec(1);
+        log_line("pacing: shutdown, divider -> %u, exec -> 1", g_wanted ? g_wanted : 2);
+    }
+    g_active = g_was_active = false;
+    g_kind = INV_STOCK;
+}
+
 void pacing_post() {
     if ((g_inv % 36000) == 0) {                      // ~10 min at 60 Hz
         log_line("pacing stats: inv=%llu LOGIC=%llu BUILD=%llu BACKLOG=%llu STOCK=%llu", g_inv,

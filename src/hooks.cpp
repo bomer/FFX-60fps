@@ -62,6 +62,10 @@ extern "C" void __cdecl fp_post() {
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { on_fault("post", GetExceptionCode()); }
     where_set(W_BETWEEN, 0xFF);
+#ifdef FPS60_DEV
+    __try { reload_poll(); }                     // between invocations, on the game thread
+    __except (EXCEPTION_EXECUTE_HANDLER) { on_fault("reload", GetExceptionCode()); }
+#endif
 }
 
 __declspec(naked) static void sg_mainloop_wrapper() {
@@ -88,17 +92,11 @@ bool hooks_install_mainloop() {
     g_mainloop_target = g_sg_mainloop;
 
     int32_t rel = (int32_t)((uint8_t*)&sg_mainloop_wrapper - (site + 5));
-    volatile LONG* p = (volatile LONG*)(site + 1);
-    DWORD old;
-    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old)) {
+    bool aligned = (((uintptr_t)(site + 1)) & 3) == 0;  // atomic: the game thread may be executing nearby
+    if (!patch_write(site + 1, &rel, 4)) {
         log_line("hook mainloop: VirtualProtect failed (%lu)", GetLastError());
         return false;
     }
-    bool aligned = (((uintptr_t)p) & 3) == 0;
-    if (aligned) InterlockedExchange(p, (LONG)rel);    // atomic: the game thread may be executing nearby
-    else         memcpy((void*)p, &rel, 4);
-    VirtualProtect(site, 5, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), site, 5);
 
     log_line("hook mainloop: ON - CALL at gva=0x%08X (rt %p) re-pointed to wrapper %p (rel32 write %s); "
              "Sg_MainLoop gva=0x%08X",
@@ -113,14 +111,50 @@ bool hooks_install_mainloop() {
 bool patch_call_rel32(uint8_t* site, void* old_target, void* new_target) {
     if (!site || site[0] != 0xE8 || call_target(site) != (uint8_t*)old_target) return false;
     int32_t rel = (int32_t)((uint8_t*)new_target - (site + 5));
-    volatile LONG* p = (volatile LONG*)(site + 1);
+    return patch_write(site + 1, &rel, 4);
+}
+
+// ---------------------------------------------------------------- patch journal
+struct Patch { uint8_t* at; uint8_t n; uint8_t orig[16]; uint8_t now[16]; };
+static Patch g_patch[512];
+static int   g_npatch = 0;
+
+bool patch_write(void* at, const void* bytes, size_t n) {
+    uint8_t* p = (uint8_t*)at;
+    if (!p || n == 0 || n > 16) return false;
     DWORD old;
-    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old)) return false;
-    if ((((uintptr_t)p) & 3) == 0) InterlockedExchange(p, (LONG)rel);
-    else memcpy((void*)p, &rel, 4);
-    VirtualProtect(site, 5, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    if (!VirtualProtect(p, n, PAGE_EXECUTE_READWRITE, &old)) return false;
+    if (g_npatch < (int)(sizeof(g_patch) / sizeof(g_patch[0]))) {
+        Patch& e = g_patch[g_npatch++];
+        e.at = p; e.n = (uint8_t)n;
+        memcpy(e.orig, p, n);
+        memcpy(e.now, bytes, n);
+    }
+    if (n == 4 && (((uintptr_t)p) & 3) == 0) InterlockedExchange((volatile LONG*)p, *(const LONG*)bytes);
+    else memcpy(p, bytes, n);
+    VirtualProtect(p, n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, n);
     return true;
+}
+
+// Newest first, so chained patches unwind in order. A site whose bytes are no longer ours (module unloaded and
+// reused, or patched again by someone else) is left alone.
+void patch_revert_all() {
+    int done = 0, skipped = 0;
+    for (int i = g_npatch - 1; i >= 0; i--) {
+        Patch& e = g_patch[i];
+        uint8_t cur[16];
+        if (!safe_copy(cur, e.at, e.n) || memcmp(cur, e.now, e.n) != 0) { skipped++; continue; }
+        DWORD old;
+        if (!VirtualProtect(e.at, e.n, PAGE_EXECUTE_READWRITE, &old)) { skipped++; continue; }
+        if (e.n == 4 && (((uintptr_t)e.at) & 3) == 0) InterlockedExchange((volatile LONG*)e.at, *(const LONG*)e.orig);
+        else memcpy(e.at, e.orig, e.n);
+        VirtualProtect(e.at, e.n, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), e.at, e.n);
+        done++;
+    }
+    log_line("patches: %d reverted, %d skipped", done, skipped);
+    g_npatch = 0;
 }
 
 // ---------------------------------------------------------------- divider hook

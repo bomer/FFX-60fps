@@ -34,6 +34,12 @@ bool hook_entry(const char* name, void* target, void* detour, void** orig) {
     return true;
 }
 
+void hook_disable_all() {
+    if (g_mh_state != 1) return;
+    MH_STATUS s = MH_DisableHook(MH_ALL_HOOKS);
+    log_line("hooks: all entry hooks disabled (%s)", MH_StatusToString(s));
+}
+
 bool hook_remove(const char* name, void* target) {
     if (g_mh_state != 1) return false;
     MH_STATUS s = MH_RemoveHook(target);

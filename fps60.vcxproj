@@ -45,6 +45,17 @@
     <OutDir>$(MSBuildThisFileDirectory)artifacts\$(Configuration)\</OutDir>
     <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\$(Configuration)\</IntDir>
   </PropertyGroup>
+  <!-- Dev build (msbuild /p:Fps60Dev=1): FPS60_DEV compiles in hot reload and the bisect hotkeys. Separate output
+       folders, so a release build (artifacts\Release, what tools/pack_dist.py packs) never contains them. -->
+  <PropertyGroup Condition="'$(Fps60Dev)'=='1'">
+    <OutDir>$(MSBuildThisFileDirectory)artifacts\Dev$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\Dev$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Fps60Dev)'=='1'">
+    <ClCompile>
+      <PreprocessorDefinitions>FPS60_DEV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
@@ -140,6 +151,7 @@
     <ClCompile Include="src\forwards.cpp" />
     <ClCompile Include="src\entry_hook.cpp" />
     <ClCompile Include="src\magic_mods.cpp" />
+    <ClCompile Include="src\reload.cpp" />
     <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\hook.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\trampoline.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>

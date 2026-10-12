@@ -99,6 +99,19 @@ static bool probe_ready() {
 static DWORD WINAPI init_thread(LPVOID) {
     log_open();
     config_load();
+    if (!GetEnvironmentVariableW(L"FPS60_HOT", nullptr, 0)) {   // fresh start: no copy of a dev hot reload is loaded
+        wchar_t dir[MAX_PATH], pat[MAX_PATH], f[MAX_PATH];
+        game_dir(dir, MAX_PATH);
+        _snwprintf_s(pat, MAX_PATH, _TRUNCATE, L"%sfps60_live_*.dll", dir);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = dir[0] ? FindFirstFileW(pat, &fd) : INVALID_HANDLE_VALUE;
+        if (h != INVALID_HANDLE_VALUE) {
+            do { _snwprintf_s(f, MAX_PATH, _TRUNCATE, L"%s%s", dir, fd.cFileName); DeleteFileW(f); } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    } else {
+        log_line("fps60: hot reload - this copy installs in place of the previous one");
+    }
     log_line("fps60 init: exe base=%p size=0x%X, enabled=%d pacing=%d rollback=%d", exe_base(), exe_size(),
              g_cfg.enabled, g_cfg.pacing, g_cfg.rollback);
     if (!g_cfg.enabled) {

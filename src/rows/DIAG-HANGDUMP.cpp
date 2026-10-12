@@ -279,8 +279,16 @@ static bool install() {
     return true;
 }
 
+// Dev hot reload: the watchdog idles once g_disabled is set; free the report files for the next copy.
+static void stop() {
+    HANDLE t = g_txt, d = g_dmp;
+    g_txt = g_dmp = INVALID_HANDLE_VALUE;
+    if (t != INVALID_HANDLE_VALUE) CloseHandle(t);
+    if (d != INVALID_HANDLE_VALUE) CloseHandle(d);
+}
+
 Row row_DIAG_HANGDUMP = {
     "DIAG-HANGDUMP",
     "diagnostic: where-breadcrumbs + all-thread stack report + minidump when Sg_MainLoop stalls; observe only",
-    1, install, pre, nullptr, 0
+    1, install, pre, nullptr, 0, stop
 };
