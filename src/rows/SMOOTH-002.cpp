@@ -33,6 +33,12 @@ static int   g_childrel = 0;
 static int   g_warp = 1, g_warp_lines = 0;
 static float g_warp_min = 30.0f, g_warp_ratio = 3.0f;
 static LONG  g_warps = 0;
+#ifdef FPS60_DEV
+// SMOOTH-002-TRACE-ID=<actor id, decimal> (dev): every draw, the drawn root position of that actor, the invocation kind
+// and whether this row moved it (U 12/10/2026: Valefor's Energy Ray stutters; check the drawn steps are even).
+static int   g_trace_id = 0;
+static LONG  g_trace_n = 0, g_trace_max = 4000;
+#endif
 
 static float tdist(const float* a, const float* b) {
     float dx = a[12] - b[12], dy = a[13] - b[13], dz = a[14] - b[14];
@@ -144,14 +150,44 @@ static void apply_interp() {
     apply_children(base, n);
 }
 
+#ifdef FPS60_DEV
+static void trace_draw(bool applied) {
+    uint8_t* base = *g_table;
+    int n = *g_count;
+    if (!base || n <= 0) return;
+    if (n > MAXA) n = MAXA;
+    for (int i = 0; i < n && g_trace_n < g_trace_max; i++) {
+        uint8_t* a = base + i * STRIDE;
+        if (a[2] == 0 || *(uint16_t*)a != (uint16_t)g_trace_id) continue;
+        const float* r = (const float*)(a + ROOT);
+        bool moved = false;
+        if (applied) for (int w = 0; w < g_w_n; w++) if (g_w_idx[w] == i) { moved = true; break; }
+        const ActHist& h = g_h[i];
+        InterlockedIncrement(&g_trace_n);
+        log_line("SMOOTH-002-TRACE: %s slot %d id 0x%04X drawn (%.2f, %.2f, %.2f) %s | tick k (%.2f, %.2f, %.2f) step %.2f",
+                 g_kind == INV_LOGIC ? "LOGIC " : g_kind == INV_BUILD ? "RENDER" : g_kind == INV_BACKLOG ? "BACKLG" : "STOCK ",
+                 i, g_trace_id, r[12], r[13], r[14], moved ? "interp" : "as-is ",
+                 h.n ? h.m[1][12] : 0.0f, h.n ? h.m[1][13] : 0.0f, h.n ? h.m[1][14] : 0.0f, h.step[1]);
+    }
+}
+#endif
+
 static void __cdecl h_draw() {
+    bool applied = false;
     if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) &&
         (g_kind == INV_LOGIC || g_kind == INV_BACKLOG)) {
         g_applied_inv = true;
         g_lwindows++;
+        applied = true;
         __try { apply_interp(); }
         __except (EXCEPTION_EXECUTE_HANDLER) { on_fault("SMOOTH-002 apply", GetExceptionCode()); }
     }
+#ifdef FPS60_DEV
+    if (g_trace_id && g_trace_n < g_trace_max) {
+        __try { trace_draw(applied); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+#endif
     g_draw();
 }
 
@@ -266,6 +302,11 @@ static bool install() {
     g_warp = config_row("SMOOTH-002-WARP", 1);
     g_warp_min = (float)config_row("SMOOTH-002-WARP-MIN", 30);
     g_warp_ratio = (float)config_row("SMOOTH-002-WARP-RATIO", 3);
+#ifdef FPS60_DEV
+    g_trace_id = config_row("SMOOTH-002-TRACE-ID", 0);
+    g_trace_max = config_row("SMOOTH-002-TRACE-N", 4000);
+    if (g_trace_id) log_line("  SMOOTH-002-TRACE: actor id 0x%04X, up to %ld draws logged", g_trace_id, g_trace_max);
+#endif
     for (int i = 0; i < 2; i++) {
         if (!patch_call_rel32(sites[i], fn, (void*)&h_draw)) {
             if (i == 1) patch_call_rel32(sites[0], (void*)&h_draw, fn);
