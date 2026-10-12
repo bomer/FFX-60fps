@@ -50,7 +50,7 @@ static bool install() {
         return false;
     }
     uint8_t* mask = abs_operand("fade mask", fn + 0x13);
-    uint8_t* sb = sig_find("X2-UI-001 fade slot base", "BE ?? ?? ?? ?? DD 05 ?? ?? ?? ?? 8B DF EB 0F", 0);
+    uint8_t* sb = sig_find("X2-UI-001 fade slot base", "BE ?? ?? ?? ?? DD 05 ?? ?? ?? ?? 8B DF EB 0F", 0x6D3A12);
     uint8_t* ob = sig_find("X2-UI-001 fade outputs",
         "0F B6 46 FC A3 ?? ?? ?? ?? C7 05 ?? ?? ?? ?? 01 00 00 00 D9 1D", 0x6D3BF0);
     if (!mask || !sb || !ob) return false;
