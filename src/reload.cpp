@@ -7,7 +7,7 @@
 //   3. Row::stop: rows undo state they hold between invocations (SMOOTH-003 held poses, half-rate switch)
 //   4. all MinHook entry hooks disabled (original prologues back), every journaled byte patch reverted
 //   5. log closed; the new copy (loaded from a unique copy, so fps60_next.dll stays writable) opens it in append
-//      mode (FPS60_HOT) and installs from scratch on its own init thread, as at game start.
+//      mode (hot_copy(): its file is fps60_live_*.dll) and installs from scratch on its own init thread, as at game start.
 // Runs between invocations on the game thread (end of fp_post). Magic DLLs loaded at that moment keep running
 // unhooked until they unload; reload outside spell animations.
 #include "fps60.h"
@@ -42,7 +42,6 @@ void reload_poll() {
     patch_revert_all();
     log_line("Num9: hot reload: this copy is passive; loading %ls", live);
     log_close();
-    SetEnvironmentVariableW(L"FPS60_HOT", L"1");
     if (!LoadLibraryW(live)) {
         DWORD err = GetLastError();
         log_reopen();

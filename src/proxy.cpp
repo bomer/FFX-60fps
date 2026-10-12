@@ -99,7 +99,7 @@ static bool probe_ready() {
 static DWORD WINAPI init_thread(LPVOID) {
     log_open();
     config_load();
-    if (!GetEnvironmentVariableW(L"FPS60_HOT", nullptr, 0)) {   // fresh start: no copy of a dev hot reload is loaded
+    if (!hot_copy()) {   // fresh start (base DLL): no copy of a dev hot reload is loaded
         wchar_t dir[MAX_PATH], pat[MAX_PATH], f[MAX_PATH];
         game_dir(dir, MAX_PATH);
         _snwprintf_s(pat, MAX_PATH, _TRUNCATE, L"%sfps60_live_*.dll", dir);

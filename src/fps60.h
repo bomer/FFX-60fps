@@ -15,6 +15,7 @@
 void log_open();                                 // fps60.log next to FFX.exe
 void log_line(const char* fmt, ...);             // timestamped, flushed per line
 void game_dir(wchar_t* out, size_t cap);         // directory of FFX.exe, with trailing '\'
+bool hot_copy();                                 // this copy was loaded by a dev hot reload (fps60_live_*.dll)
 
 // ---------------------------------------------------------------- config.cpp
 enum AltBacklog { ALT_BACKLOG_LOGIC = 0, ALT_BACKLOG_TOGGLE = 1 };

@@ -21,6 +21,21 @@ void game_dir(wchar_t* out, size_t cap) {
     out[0] = 0;
 }
 
+// Dev hot reload: reload.cpp loads each new copy from fps60_live_<tick>.dll, so a copy is a reload only when its own
+// file has that name. (It used to be the environment variable FPS60_HOT, which a restarted game inherited: the stale
+// base dbghelp.dll then ran as a "hot reload", appended to the old log and kept the live copies, U+D 12/10/2026.)
+bool hot_copy() {
+    HMODULE self = nullptr;
+    wchar_t path[MAX_PATH];
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&hot_copy, &self)) return false;
+    DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    const wchar_t* base = path;
+    for (DWORD i = 0; i < n; i++) if (path[i] == L'\\' || path[i] == L'/') base = path + i + 1;
+    return _wcsnicmp(base, L"fps60_live_", 11) == 0;
+}
+
 void log_open() {
     if (g_log_init) return;
     InitializeCriticalSection(&g_log_cs);
@@ -29,8 +44,8 @@ void log_open() {
     wchar_t path[MAX_PATH];
     game_dir(path, MAX_PATH);
     if (!path[0] || lstrlenW(path) > MAX_PATH - 20) return;
-    // Dev hot reload (reload.cpp sets FPS60_HOT): the previous copy closed the log; continue the same file.
-    if (GetEnvironmentVariableW(L"FPS60_HOT", nullptr, 0)) {
+    // Dev hot reload: the previous copy closed the log; continue the same file.
+    if (hot_copy()) {
         lstrcatW(path, L"fps60.log");
         g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (g_log != INVALID_HANDLE_VALUE) SetFilePointer(g_log, 0, nullptr, FILE_END);
