@@ -117,6 +117,30 @@ static void hotkey_fx_rows() {
     log_line("F4: field effect rows FX-010=%d TEXANIM-001=%d", rows[0]->on, rows[1]->on);
 }
 
+// Diagnostic hotkey F6: bisect battle-side rows at runtime (U 12/10/2026: Echuilles battle light rays flicker every
+// frame; not FX-010). Each press turns the next row in the list alone off (only rows that gate on .on per call and
+// keep no per-cast state), then all back on.
+static void hotkey_battle_rows() {
+    static bool prev = false;
+    static Row* rows[] = { &row_MAG006, &row_MAG025, &row_UI001, &row_MAG022, &row_MAG017, &row_MAG026 };
+    enum { N = sizeof(rows) / sizeof(rows[0]) };
+    static int installed[N], state = 0;
+    static bool init = false;
+    bool down = (GetAsyncKeyState(VK_F6) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000);   // Ctrl+F6: HANGDUMP test
+    bool edge = down && !prev;
+    prev = down;
+    if (!edge) return;
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid != GetCurrentProcessId()) return;
+    if (!init) { for (int i = 0; i < N; i++) installed[i] = rows[i]->on; init = true; }
+    state = (state + 1) % (N + 1);
+    for (int i = 0; i < N; i++) rows[i]->on = installed[i] && state != i + 1;
+    if (state) log_line("F6: only %s off (installed %d)", rows[state - 1]->id, installed[state - 1]);
+    else log_line("F6: battle rows all back on");
+}
+
 // A row hook that takes > 50 ms in one invocation is logged (spell-start pause, U 12/10/2026).
 static void row_call(Row* r, void (*fn)(), const char* what) {
     static LARGE_INTEGER f = {};
@@ -132,6 +156,7 @@ static void row_call(Row* r, void (*fn)(), const char* what) {
 void rows_pre() {
     hotkey_camera_rows();
     hotkey_fx_rows();
+    hotkey_battle_rows();
     for (Row** p = g_rows; *p; p++)
         if ((*p)->on && (*p)->pre) { where_set(W_ROW_PRE, (int)(p - g_rows)); row_call(*p, (*p)->pre, "pre"); }
 }
