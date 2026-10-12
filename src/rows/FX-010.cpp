@@ -616,6 +616,57 @@ static void ex_apply(uint8_t* prog) {
     g_ex_words += g_ex_nw;
 }
 
+// FX-010-INTERP (test, default 0; overrides EXTRAP): logic invocations draw particles half a tick behind, between
+// their last two tick states, like SMOOTH draws characters (U 12/10/2026: EXTRAP's half-tick guess flashed twice).
+// The real step runs with skip-render set (the engine's own backlog mode: the submits FUN_006458a0 / FUN_00645ba0 and
+// several draw ops return early on DAT_012fb7d0, S), so it advances without drawing; then a paused step draws with
+// every eligible header word at (k-1 + k) / 2, and the words go back. Render-only invocations draw tick k as before.
+// Interpolated values always lie between two real states (no overshoot); words that were ever beyond world scale
+// stay at tick k (BIGREL sticky flag).
+static int  g_interp = 0, g_interp_cfg = 0;
+static LONG g_ip_parts = 0, g_ip_words = 0, g_ip_lines = 0, g_ip_redraws = 0;
+
+static void ip_apply(uint8_t* prog) {
+    g_ex_nw = 0;
+    int pi = prog_index(prog);
+    if (pi < g_ex_lo || pi > g_ex_hi) return;
+    __try {
+        for_particles(prog, [&](uint8_t* part, uint32_t len, uint8_t* def) {
+            uint32_t hlen = (uint32_t)*(int*)(def + 0x20) & ~3u;
+            if (hlen > len) hlen = len;
+            PSnap* e = psnap_find(part, false);
+            if (!e || e->len != len || e->ncur != g_fx_n || e->nprev != g_fx_n - 1) return;
+            int32_t ac = *(int32_t*)(e->cur + 0xC), ap = *(int32_t*)(e->prev + 0xC);
+            if (ac <= ap || *(int32_t*)(part + 0xC) != ac) return;     // new life, restart, or changed since
+            DefRate* drate = def_rate(def, false);
+            bool any = false;
+            for (uint32_t o = 0x10; o < hlen && g_ex_nw < EX_MAXW; o += 4) {
+                if (*(uint32_t*)(e->prev + o) == *(uint32_t*)(e->cur + o)) continue;
+                if (*(uint32_t*)(part + o) != *(uint32_t*)(e->cur + o)) continue;
+                float a = *(float*)(e->prev + o), b = *(float*)(e->cur + o);
+                if (!floatish(a) || !floatish(b)) continue;
+                if ((a < 0) != (b < 0)) continue;                    // sign flip (angle wrap): hold
+                if (g_ex_bigrel && drate) {
+                    if (drate->big[o / 4]) continue;
+                    float ma = a < 0 ? -a : a, mb = b < 0 ? -b : b, mx = ma > mb ? ma : mb, d1 = b - a;
+                    if (mx > 1000.0f && (d1 < 0 ? -d1 : d1) > 0.2f * mx) continue;
+                }
+                if (o / 4 < 0x800 && g_ex_skipw[o / 4]) continue;
+                if (g_ex_diag) ex_count(pi, o);
+                float x = a + 0.5f * (b - a);
+                if ((int)o == g_ex_trace && InterlockedIncrement(&g_ex_trace_n) <= 120)
+                    log_line("FX-010-INTERP-TRACE: program %d part %p age %d: +0x%X k-1 %.5f k %.5f -> drawn %.5f",
+                             pi, part, ac, o, a, b, x);
+                g_ex_rec[g_ex_nw] = part; g_ex_off[g_ex_nw] = o; g_ex_val[g_ex_nw] = *(uint32_t*)(e->cur + o); g_ex_nw++;
+                *(float*)(part + o) = x;
+                any = true;
+            }
+            if (any) InterlockedIncrement(&g_ip_parts);
+        });
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    g_ip_words += g_ex_nw;
+}
+
 static void ex_restore() {
     __try { for (int i = 0; i < g_ex_nw; i++) *(uint32_t*)(g_ex_rec[i] + g_ex_off[i]) = g_ex_val[i]; }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -632,7 +683,7 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         if (g_diag_submit) diag_step_begin(2);
         if (g_diag_writes) { wr_snapshot((uint8_t*)prog); g_ph_active = 1; }
         if (g_rollback) rb_save((uint8_t*)prog);
-        if (g_extrap && g_psnap) ex_apply((uint8_t*)prog);
+        if (g_extrap && !g_interp && g_psnap) ex_apply((uint8_t*)prog);
         int r = ppp_step_paused(g_tramp, prog, flags);
         if (g_ex_nw) ex_restore();
         g_ph_active = 0;
@@ -658,10 +709,20 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         if (pi < g_prog_lo || pi > g_prog_hi) defer = false;
     }
     g_defer_prog = defer ? prog : nullptr;
+    bool interp = g_interp && g_psnap && row_FX010.on && !g_disabled && pacing_active() && pacing_kind() != INV_BUILD &&
+                  g_skip_render && *g_skip_render == 0 && prog_selected(prog);
+    if (interp) *g_skip_render = 1;                          // advance without drawing (engine backlog mode)
     int r = g_tramp(prog, flags);
+    if (interp) *g_skip_render = 0;
     g_defer_prog = nullptr;
     if (r && g_deferred_n) deferred_flush(prog, true);       // program ended: the field loop frees it now
     if (!r && g_psnap && row_FX010.on && pacing_kind() != INV_BUILD) ex_snapshot((uint8_t*)prog);
+    if (interp && !r) {                                      // draw once, paused, half a tick behind
+        ip_apply((uint8_t*)prog);
+        ppp_step_paused(g_tramp, prog, flags);
+        if (g_ex_nw) ex_restore();
+        InterlockedIncrement(&g_ip_redraws);
+    }
     if (g_diag_submit) diag_step_end(prog, 1);
     return r;
 }
@@ -860,6 +921,8 @@ static bool install() {
     g_ex_diag = config_row("FX-010-EXTRAP-DIAG", 0);
     g_ex_unit = config_row("FX-010-EXTRAP-UNIT", 1);
     g_ex_bigrel = config_row("FX-010-EXTRAP-BIGREL", 1);
+    g_interp = config_row("FX-010-INTERP", 0);
+    g_interp_cfg = g_interp;
     {
         char t[32];
         config_str("rows", "FX-010-EXTRAP-TRACE", t, sizeof(t), "");
@@ -890,7 +953,8 @@ static bool install() {
     }
     g_psnap = (PSnap*)calloc(PS_N, sizeof(PSnap));
     g_dr = (DefRate*)calloc(NDR, sizeof(DefRate));
-    log_line("  FX-010-EXTRAP: %s (%d%% of a tick)", g_extrap ? "on" : "off", g_extrap_pct);
+    log_line("  FX-010-EXTRAP: %s (%d%% of a tick)%s", g_extrap ? "on" : "off", g_extrap_pct, g_interp ? " - overridden by FX-010-INTERP" : "");
+    if (g_interp) log_line("  FX-010-INTERP: on (logic invocations draw particles half a tick behind; real step under skip-render)");
     if (g_rollback) log_line("  FX-010: FX-010-ROLLBACK on: paused steps of selected programs leave their records unchanged");
     g_loopdefer = config_row("FX-010-LOOPDEFER", 1) != 0;
     if (g_loopdefer) {
@@ -946,6 +1010,11 @@ static bool install() {
 static void ex_hotkey() {                        // dev hotkey Num 7
     static bool prev = false;
     if (!dev_key(VK_NUMPAD7, &prev) || !g_psnap) return;
+    if (g_interp_cfg) {                          // FX-010-INTERP configured: Num 7 toggles interpolation instead
+        g_interp = !g_interp;
+        log_line("Num7: FX-010-INTERP=%d (logic invocations draw particles half a tick behind)", g_interp);
+        return;
+    }
     g_extrap = !g_extrap;
     log_line("Num7: FX-010-EXTRAP=%d (particles moved %d%% of a tick ahead on paused frames)", g_extrap, g_extrap_pct);
 }
@@ -957,7 +1026,7 @@ static void pre() {
     ex_hotkey();
 #endif
     static LONG ex_dump_at = 0;
-    if (g_ex_diag && g_extrap && g_fx_n - ex_dump_at >= 600 && g_nexc) {
+    if (g_ex_diag && (g_extrap || g_interp) && g_fx_n - ex_dump_at >= 600 && g_nexc) {
         ex_dump_at = g_fx_n;
         char line[600];
         int pos = 0, prog = -1;
@@ -975,6 +1044,10 @@ static void pre() {
     if (g_extrap && g_ex_parts - g_ex_lines >= 20000) {
         g_ex_lines = g_ex_parts;
         log_line("FX-010-EXTRAP: %ld particle draws extrapolated, %ld words", g_ex_parts, g_ex_words);
+    }
+    if (g_interp && g_ip_parts - g_ip_lines >= 20000) {
+        g_ip_lines = g_ip_parts;
+        log_line("FX-010-INTERP: %ld particle draws interpolated, %ld words, %ld program redraws", g_ip_parts, g_ip_words, g_ip_redraws);
     }
     if (g_patched) return;
     g_patched = true;
