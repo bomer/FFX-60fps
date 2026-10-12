@@ -95,6 +95,28 @@ static void hotkey_camera_rows() {
     log_line("F8: camera rows LOOP-005=%d LOOP-004=%d", rows[0]->on, rows[1]->on);
 }
 
+// Diagnostic hotkey F4: tell which field system an unsmooth effect belongs to (U 12/10/2026, boat splash). Cycles
+// FX-010 + TEXANIM-001 both on -> FX-010 off (field particles step every frame: smooth but 2x) -> TEXANIM-001 off
+// (texture animations every frame) -> both on. Both rows gate on their .on flag per call.
+static void hotkey_fx_rows() {
+    static bool prev = false;
+    static int  installed[2] = { -1, -1 }, state = 0;
+    Row* rows[2] = { &row_FX010, &row_TEXANIM001 };
+    bool down = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
+    bool edge = down && !prev;
+    prev = down;
+    if (!edge) return;
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid != GetCurrentProcessId()) return;
+    for (int i = 0; i < 2; i++) if (installed[i] < 0) installed[i] = rows[i]->on;
+    state = (state + 1) % 3;
+    rows[0]->on = installed[0] && state != 1;
+    rows[1]->on = installed[1] && state != 2;
+    log_line("F4: field effect rows FX-010=%d TEXANIM-001=%d", rows[0]->on, rows[1]->on);
+}
+
 // A row hook that takes > 50 ms in one invocation is logged (spell-start pause, U 12/10/2026).
 static void row_call(Row* r, void (*fn)(), const char* what) {
     static LARGE_INTEGER f = {};
@@ -109,6 +131,7 @@ static void row_call(Row* r, void (*fn)(), const char* what) {
 
 void rows_pre() {
     hotkey_camera_rows();
+    hotkey_fx_rows();
     for (Row** p = g_rows; *p; p++)
         if ((*p)->on && (*p)->pre) { where_set(W_ROW_PRE, (int)(p - g_rows)); row_call(*p, (*p)->pre, "pre"); }
 }
