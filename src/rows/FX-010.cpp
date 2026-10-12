@@ -460,8 +460,10 @@ template <class F> static void for_particles(uint8_t* prog, F fn) {
 
 // How often each header word changes per tick, per group def (EMA, 255 = every tick). Moving parts change on every
 // tick; a stepped word (+0x12C of the Echuilles rays, ~30% of ticks) never reaches the bar, so it is never moved.
-struct DefRate { uint8_t* def; LONG seen; uint8_t r[0x800]; };
+struct DefRate { uint8_t* def; LONG seen; uint8_t r[0x800]; uint8_t big[0x800]; };   // big: word was ever > BIG_MAG
 enum { NDR = 64, RATE_MIN = 200 };
+static bool floatish(float x);
+static const float BIG_MAG = 4096.0f;              // beyond field world scale: not geometry
 static DefRate* g_dr = nullptr;
 
 static DefRate* def_rate(uint8_t* def, bool create) {
@@ -474,6 +476,7 @@ static DefRate* def_rate(uint8_t* def, bool create) {
     if (!create) return nullptr;
     old->def = def; old->seen = g_fx_n;
     memset(old->r, 0, sizeof(old->r));
+    memset(old->big, 0, sizeof(old->big));
     return old;
 }
 
@@ -514,6 +517,8 @@ static void ex_snapshot(uint8_t* prog) {
                 for (uint32_t o = 0x10; d && o < hlen && o / 4 < 0x800; o += 4) {
                     uint8_t& r = d->r[o / 4];
                     bool chg = *(uint32_t*)(e->cur + o) != *(uint32_t*)(e->prev + o);
+                    float v = *(float*)(e->cur + o);
+                    if (floatish(v) && (v > BIG_MAG || v < -BIG_MAG)) d->big[o / 4] = 1;
                     r = (uint8_t)(r - (r >> 3) + (chg ? 31 : 0));
                 }
             }
@@ -536,6 +541,7 @@ static ExCnt g_exc[512];
 static int   g_nexc = 0;
 
 static int  g_ex_unit = 1;                       // FX-010-EXTRAP-UNIT=0: also move 0..1 words
+static int  g_ex_bigrel = 1;                     // FX-010-EXTRAP-BIGREL=0: also move words that were ever > 4096 or jump > 20% a tick above 1000
 static int  g_ex_trace = -1;                     // FX-010-EXTRAP-TRACE=<hex offset>: log moves of this header word
 static LONG g_ex_trace_n = 0;
 
@@ -575,6 +581,16 @@ static void ex_apply(uint8_t* prog) {
                 // 0..1 words (alpha, colour, blend factors) stay at the tick value: +0x12C of the Echuilles rays, a
                 // 0.08..0.85 fade, still flashed when moved even inside last loop's range (U 12/10/2026).
                 if (g_ex_unit && z >= 0.0f && z <= 1.0f && a >= 0.0f && a <= 1.0f && b >= 0.0f && b <= 1.0f) continue;
+                // Large words that change by > 20% of their size per tick are not motion: +0xE4 of the Kilika woods
+                // lights (programs 35..77) went 15052 -> 10700 -> 7174 -> 4806 and restarted; moved half a tick ahead,
+                // the lights flashed (U 12/10/2026; D FX-010-EXTRAP-TRACE=E4; SKIPOFFS=E4 stopped it, U).
+                if (g_ex_bigrel) {
+                    // A word that was ever beyond world scale for this group def stays held, also once it is small again
+                    // (the same lights wander 1e5..1e2; one pass under the 20% bar still flashed, U 12/10/2026).
+                    if (drate->big[o / 4]) continue;
+                    float ma = a < 0 ? -a : a, mb = b < 0 ? -b : b, mx = ma > mb ? ma : mb;
+                    if (mx > 1000.0f && (d1 < 0 ? -d1 : d1) > 0.2f * mx) continue;
+                }
                 float m = (d0 < 0 ? -d0 : d0) > (d1 < 0 ? -d1 : d1) ? (d0 < 0 ? -d0 : d0) : (d1 < 0 ? -d1 : d1);
                 float dd = d1 - d0;
                 if ((dd < 0 ? -dd : dd) > 0.5f * m) continue;
@@ -843,6 +859,7 @@ static bool install() {
     g_extrap_pct = config_row("FX-010-EXTRAP-PCT", 50);
     g_ex_diag = config_row("FX-010-EXTRAP-DIAG", 0);
     g_ex_unit = config_row("FX-010-EXTRAP-UNIT", 1);
+    g_ex_bigrel = config_row("FX-010-EXTRAP-BIGREL", 1);
     {
         char t[32];
         config_str("rows", "FX-010-EXTRAP-TRACE", t, sizeof(t), "");
