@@ -146,6 +146,7 @@ extern Row row_DEVSTOCK;                        // rows/DEV-STOCK.cpp (test tool
 extern Row row_DEVTURBO;                        // rows/DEV-TURBO.cpp (test tool: hold a key to fast-forward)
 extern Row row_UIBTLL1;                         // rows/UI-BTLL1.cpp (battle L1 party swap presses kept)
 extern Row row_UI014;                           // rows/UI-014.cpp (minimap arrow pulse per logic tick)
+extern Row row_PERF001;                         // rows/PERF-001.cpp (1 ms timer, no power throttling)
 extern Row row_TEXANIM001;                      // rows/TEXANIM-001.cpp (chr texture animation per logic tick)
 extern Row row_DIAG_DYNGEO;                    // rows/DIAG-DYNGEO.cpp (dynamic-geometry upload diag)
 extern Row row_SR003;                          // rows/SR-003.cpp (soft reset chord -> title)
