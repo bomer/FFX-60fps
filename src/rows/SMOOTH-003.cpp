@@ -123,7 +123,7 @@ static bool safe_sync() {
 // Safety net against twisted poses: a bone angle of the render-only step that jumps far more than the actor
 // moved over the last tick keeps its tick value.
 static const uint32_t POSE = 0x748, BONES = 0x328, POSE_STRIDE = 0x18C, BONE_STRIDE = 0x160;
-static const int MAXB = 256;
+static const int MAXB = 1024;                      // bones per actor (Bahamut 0x3006 has more than 256, 13/10/2026)
 static const uint32_t BANG[3] = { 0xE4, 0xE8, 0xEC };   // bone rotation (radians)
 static const float INV_2PI = 0.15915494f;
 static float*   g_prev_ang = nullptr;     // MAXA * MAXB * 3: angles after the previous logic step (tick k-1)
@@ -144,7 +144,13 @@ static int bone_count(const uint8_t* a) {
     const uint8_t* hdr = *(uint8_t* const*)(a + HDR);
     if (!hdr) return 0;
     int n = *(const uint16_t*)(hdr + 10);
-    return (n > 0 && n <= MAXB) ? n : 0;
+    if (n > MAXB) {
+        static LONG once = 0;
+        if (InterlockedIncrement(&once) == 1)
+            log_line("SMOOTH-003: actor id 0x%04X has %d bones (> %d): per-bone checks skip it", *(const uint16_t*)a, n, MAXB);
+        return 0;
+    }
+    return n > 0 ? n : 0;
 }
 
 // After a logic step: rotate tick k-1 <- tick k <- this pose.
@@ -403,11 +409,6 @@ static bool stock_actor(const uint8_t* a) {
     return g_cloth == 1 && (fl & 0x600000) == 0x600000;
 }
 
-static int  g_despike_id = 0;                        // SMOOTH-003-DESPIKE-ID (decimal)
-static void despike(int i, uint8_t* a);
-static bool despike_match(uint16_t id);
-static int  g_xfade = 0;                             // SMOOTH-003-XFADE (steps, DESPIKE-ID actors; 0/1 = off)
-static LONG g_xfades = 0;
 
 static void __cdecl h_step(uint8_t* a, int full) {
     if (g_disabled || !row_SMOOTH003.on) {
@@ -435,43 +436,11 @@ static void __cdecl h_step(uint8_t* a, int full) {
         *g_half = 0;                                    // whole stock step: no half step, no debt
         g_step(a, full);
         *g_half = 1;
-        if (g_despike_id) { __try { despike(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-        InterlockedIncrement(&g_stock_steps);
+            InterlockedIncrement(&g_stock_steps);
         if (full && (g_sanity || g_endextrap)) __try { record_angles(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         return;
     }
-    // SMOOTH-003-XFADE (DESPIKE-ID actors): Bahamut's motions switch without the engine's motion blend (+0x752 = 1),
-    // so a new motion snaps from the last pose to its frame 0 (hurt motion: root about 12 units, U 13/10/2026 "pop").
-    // When this logic step started a new motion (start/end/len changed, sample 0), this frame keeps the last pose
-    // (node outputs +0x20 and bones restored) and the engine's own blend (FUN_008395b0: current += (target -
-    // current) / n per call, all dirty flags set) runs over the next XFADE steps: +0x752 = XFADE and flag 0x10000
-    // ("blend done", which selects the reduced blend path) cleared.
-    int xnb = 0;
-    bool xf = g_xfade > 1 && g_despike_id && i >= 0 && despike_match(*(const uint16_t*)a);
-    int32_t xlen = *(const int32_t*)(a + M_LEN), xend = *(const int32_t*)(a + M_END), xstart = *(const int32_t*)(a + M_START);
-    if (xf) __try { xnb = sanity_save(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) { xnb = 0; }
     g_step(a, full);
-    if (xf && xnb && *(const uint32_t*)(a + SAMPLE_CLOCK) == 0 &&
-        (*(const int32_t*)(a + M_LEN) != xlen || *(const int32_t*)(a + M_END) != xend || *(const int32_t*)(a + M_START) != xstart)) {
-        __try {
-            uint8_t* pose = *(uint8_t**)(a + POSE);
-            uint8_t* bones = *(uint8_t**)(a + BONES);
-            if (pose && bones) {
-                for (int pe = 0; pe < xnb; pe++)
-                    for (int c = 0; c < 9; c++) {
-                        uint32_t po = (uint32_t)pe * POSE_STRIDE + (uint32_t)c * NODE_SIZE;
-                        *(float*)(pose + po + 0x20) = *(const float*)(g_pose_save + po + 0x20);
-                    }
-                memcpy(bones, g_bone_save, (size_t)xnb * BONE_STRIDE);
-                *(int16_t*)(a + BLEND_N) = (int16_t)g_xfade;
-                *(uint32_t*)(a + FLAGS) &= ~0x10000u;
-                if (InterlockedIncrement(&g_xfades) <= 20 || diag_id_match(*(const uint16_t*)a))
-                    log_line("SMOOTH-003-XFADE: slot=%d id=0x%04X new motion (len %d -> %d): last pose kept, engine blend over %d steps",
-                             i, *(const uint16_t*)a, xlen, *(const int32_t*)(a + M_LEN), g_xfade);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    if (g_despike_id) { __try { despike(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (full && (g_sanity || g_endextrap)) __try { record_angles(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (i >= 0 && *g_half != 0) { g_debt[i] = 1; g_debt_id[i] = *(uint16_t*)a; }
 }
@@ -722,76 +691,6 @@ static bool slerp_pose(int i, uint8_t* a) {
     return true;
 }
 
-// ---------------------------------------------------------------- rotation speed limit (SMOOTH-003-DESPIKE)
-// Per listed actor id (SMOOTH-003-DESPIKE-ID, -ID-END; decimal): every drawn frame, a bone's local rotation turns at
-// most DESPIKE-DEG degrees from the last drawn one (slerp toward the target). Changes the original animation: for
-// motions with one-keyframe flicks (Bahamut's hit motion frame 27, pose entry 11: 86 deg in one 30 Hz frame, stock
-// shows it too; user 13/10/2026 "Bahamut only").
-static int   g_despike_id_end = 0;
-static float g_despike_cos = 0;                      // cos(half of the limit angle)
-static float g_despike_rad = 0;
-static const int DSLOTS = 4;
-static struct { int slot; uint16_t id; int nb; Q q[MAXB]; } g_ds[DSLOTS];
-static LONG g_despiked = 0;
-
-static bool despike_match(uint16_t id) {
-    return g_despike_id && id >= (uint16_t)g_despike_id && id <= (uint16_t)(g_despike_id_end ? g_despike_id_end : g_despike_id);
-}
-
-// Write rotation q to bone bo in the Euler form closest to the angles L the bone holds now.
-static void write_bone_q(uint8_t* bo, const Q& q, const float* L) {
-    const float PI = 3.14159265f, TWO_PI = 6.2831853f;
-    float e[3], f[3];
-    euler_of(m3_t(col_of_quat(q)), g_sgn, e);
-    f[0] = e[0] + PI; f[1] = PI - e[1]; f[2] = e[2] + PI;
-    float de = 0, df = 0;
-    for (int c = 0; c < 3; c++) {
-        e[c] += TWO_PI * floorf((L[c] - e[c]) / TWO_PI + 0.5f);
-        f[c] += TWO_PI * floorf((L[c] - f[c]) / TWO_PI + 0.5f);
-        de += fabsf(e[c] - L[c]); df += fabsf(f[c] - L[c]);
-    }
-    const float* w = de <= df ? e : f;
-    for (int c = 0; c < 3; c++) {
-        *(float*)(bo + BANG[c]) = w[c];
-        *(float*)(bo + BANG[c] + 0x30) = w[c];
-    }
-}
-
-static void despike(int i, uint8_t* a) {
-    if (!g_despike_id || !g_slerp_ok || i < 0 || !despike_match(*(const uint16_t*)a)) return;
-    int nb = bone_count(a);
-    uint8_t* bones = *(uint8_t**)(a + BONES);
-    if (!nb || !bones) return;
-    int s = -1, freeslot = -1;
-    for (int k = 0; k < DSLOTS; k++) {
-        if (g_ds[k].slot == i && g_ds[k].id == *(const uint16_t*)a && g_ds[k].nb == nb) { s = k; break; }
-        if (freeslot < 0 && (g_ds[k].nb == 0 || g_ds[k].slot == i)) freeslot = k;
-    }
-    bool fresh = s < 0;
-    if (fresh) {
-        s = freeslot >= 0 ? freeslot : (i % DSLOTS);
-        g_ds[s].slot = i; g_ds[s].id = *(const uint16_t*)a; g_ds[s].nb = nb;
-    }
-    for (int b = 0; b < nb; b++) {
-        uint8_t* bo = bones + (size_t)b * BONE_STRIDE;
-        float L[3];
-        for (int c = 0; c < 3; c++) L[c] = *(const float*)(bo + BANG[c]);
-        Q q = quat_of_col(m3_t(euler_model(L[0], L[1], L[2], g_sgn)));
-        if (!fresh) {
-            Q p = g_ds[s].q[b];
-            float d = fabsf(p.w * q.w + p.x * q.x + p.y * q.y + p.z * q.z);
-            if (d < g_despike_cos) {
-                float ang = 2.0f * acosf(d > 1 ? 1 : d);
-                q = slerp_q(p, q, g_despike_rad / ang);
-                write_bone_q(bo, q, L);
-                if (InterlockedIncrement(&g_despiked) == 1)
-                    log_line("SMOOTH-003-DESPIKE: first bone turn limited (id 0x%04X bone %d, %.0f deg)",
-                             *(const uint16_t*)a, b, ang * 57.29578f);
-            }
-        }
-        g_ds[s].q[b] = q;
-    }
-}
 
 static bool walk_step(int i, uint8_t* a, uint32_t fl) {
     bool child = *(uint32_t*)(a + PARENT) != 0;
@@ -838,7 +737,6 @@ static bool walk_step(int i, uint8_t* a, uint32_t fl) {
         if (diag_id_match(*(const uint16_t*)a)) { __try { out_diag(i, a, nb); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
         else if (g_sanity) { __try { sanity_check(i, a, nb, c0); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     }
-    if (ok && g_despike_id) { __try { despike(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (kind) {
         // Unwrapped clock + the half step just added: the next logic Ch_SeqFrame wraps / counts down exactly as stock.
         *(int32_t*)(a + M_CLOCK) = c0 + (*(int32_t*)(a + M_CLOCK) - cs);
@@ -1267,7 +1165,29 @@ static void pose_log() {
     }
 }
 
+// DIAG-ID actors: one line every 120 invocations with the fields the SMOOTH-003 paths test.
+static void actor_dump() {
+    uint8_t* base = *g_table;
+    int n = *g_count;
+    if (!base || n <= 0) return;
+    if (n > MAXA) n = MAXA;
+    static LONG calls = 0;
+    if (InterlockedIncrement(&calls) % 120 != 1) return;
+    for (int i = 0; i < n; i++) {
+        const uint8_t* a = base + i * STRIDE;
+        if (!diag_id_match(*(const uint16_t*)a)) continue;
+        log_line("ACTOR slot=%d/%d id=0x%04X +2=%d +0x180=%d +0x181=%d fl %08X hdr %p bones %p nb %d pose %p parent %08X "
+                 "seq %08X len %d clock %d sample 0x%X blend %d debt %d walked %d",
+                 i, n, *(const uint16_t*)a, a[2], a[0x180], a[0x181], *(const uint32_t*)(a + FLAGS),
+                 *(void* const*)(a + HDR), *(void* const*)(a + BONES), bone_count(a), *(void* const*)(a + POSE),
+                 *(const uint32_t*)(a + PARENT), *(const uint32_t*)(a + M_SEQ), *(const int32_t*)(a + M_LEN),
+                 *(const int32_t*)(a + M_CLOCK), *(const uint32_t*)(a + SAMPLE_CLOCK), (int)*(const int16_t*)(a + BLEND_N),
+                 g_debt[i], g_walked[i]);
+    }
+}
+
 static void post() {
+    if (g_diag_id && !g_disabled) __try { actor_dump(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (g_spike && g_diag_id && !g_disabled) __try { spike_scan(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (g_poselog && g_diag_id && !g_disabled) __try { pose_log(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     static LONG last = 0;
@@ -1409,20 +1329,8 @@ static bool install() {
     if (KEYHOLD_D < 0x80 || KEYHOLD_D > 0x800) KEYHOLD_D = 0x300;
     g_spike = config_row("SMOOTH-003-SPIKE", 0);
     g_poselog = config_row("SMOOTH-003-POSELOG", 0);
-    g_despike_id = config_row("SMOOTH-003-DESPIKE-ID", 0);
-    g_despike_id_end = config_row("SMOOTH-003-DESPIKE-ID-END", 0);
-    g_xfade = config_row("SMOOTH-003-XFADE", 0);
-    if (g_xfade < 0 || g_xfade > 30) g_xfade = 0;
-    {
-        int deg = config_row("SMOOTH-003-DESPIKE-DEG", 20);
-        if (deg < 2 || deg > 170) deg = 20;
-        g_despike_rad = deg * 0.017453293f;
-        g_despike_cos = cosf(0.5f * g_despike_rad);
-        if (g_despike_id) log_line("  SMOOTH-003-DESPIKE: ids %d..%d, bones turn at most %d deg per drawn frame (needs SLERP's fit)",
-                                   g_despike_id, g_despike_id_end ? g_despike_id_end : g_despike_id, deg);
-    }
     g_slerp = config_row("SMOOTH-003-SLERP", 1);
-    if (g_slerp || g_despike_id) {
+    if (g_slerp) {
         // Ch_SkeletonJob bone loop: fld [ebx+0xE4] / push / call rotX / fld [ebx+0xE8] ... call rotY ... call rotZ
         uint8_t* rs = sig_find_unique("SMOOTH-003-SLERP bone rotation calls (Ch_SkeletonJob)",
             "D9 83 E4 00 00 00 D9 1C 24 50 50 E8 ?? ?? ?? ?? D9 83 E8 00 00 00 83 C4 08 8D 85 FC BF FF FF D9 1C 24 50 50 E8 "
