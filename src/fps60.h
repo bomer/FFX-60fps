@@ -93,6 +93,7 @@ bool pacing_divider_request(uint32_t req);       // from the divider hook; true 
 bool pacing_active();                            // 60 Hz pacing currently applied
 int  pacing_kind();                              // InvKind of the current invocation
 void pacing_hold_stock(const char* who, bool hold); // a row asks for stock pacing (e.g. FMV)
+void pacing_force_logic(bool on);                // every invocation a logic tick, kind INV_BACKLOG (booster)
 
 // ---------------------------------------------------------------- rollback.cpp
 // A span is snapshotted at the start of every INV_BUILD invocation and written back at its end,
@@ -149,6 +150,7 @@ extern Row row_UI014;                           // rows/UI-014.cpp (minimap arro
 extern Row row_PERF001;                         // rows/PERF-001.cpp (1 ms timer, no power throttling)
 extern Row row_PERF002;                         // rows/PERF-002.cpp (stock 30 fps when 60 is not held)
 extern Row row_QOLSENSOR;                       // rows/QOL-SENSOR.cpp (gameplay: party always has Sensor)
+extern Row row_BOOST001;                        // rows/BOOST-001.cpp (game speed booster 2x/4x at 60 Hz)
 extern Row row_QOLAP;                           // rows/QOL-AP.cpp (gameplay: whole party earns AP)
 extern Row row_TEXANIM001;                      // rows/TEXANIM-001.cpp (chr texture animation per logic tick)
 extern Row row_DIAG_DYNGEO;                    // rows/DIAG-DYNGEO.cpp (dynamic-geometry upload diag)

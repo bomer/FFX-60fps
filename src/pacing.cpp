@@ -7,6 +7,7 @@
 static uint32_t g_wanted = 0;        // last divider value the GAME asked for
 static bool     g_wanted_known = false;
 static int      g_hold = 0;          // number of rows currently holding stock pacing
+static bool     g_force_logic = false; // a row asks every invocation to be a logic tick (game speed booster)
 static bool     g_active = false;    // alternation applied this invocation
 static bool     g_was_active = false;
 static int      g_phase = 1;         // 1 = next rendered invocation is LOGIC
@@ -34,6 +35,8 @@ void pacing_hold_stock(const char* who, bool hold) {
     if (g_hold < 0) g_hold = 0;
     PLOG("pacing: %s %s stock pacing (holders now %d)", who, hold ? "holds" : "releases", g_hold);
 }
+
+void pacing_force_logic(bool on) { g_force_logic = on; }
 
 bool pacing_divider_request(uint32_t req) {
     uint32_t prev = g_wanted;
@@ -86,7 +89,7 @@ void pacing_pre() {
 #endif
     bool backlog = *g_backlog_count > 1;
     int target;
-    if (backlog && g_cfg.alt_backlog == ALT_BACKLOG_LOGIC) {
+    if ((backlog || g_force_logic) && g_cfg.alt_backlog == ALT_BACKLOG_LOGIC) {
         target = 1;
         g_kind = INV_BACKLOG;
     } else {

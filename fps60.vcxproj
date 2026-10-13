@@ -137,6 +137,7 @@
     <ClCompile Include="src\rows\UI-014.cpp" />
     <ClCompile Include="src\rows\PERF-001.cpp" />
     <ClCompile Include="src\rows\PERF-002.cpp" />
+    <ClCompile Include="src\rows\BOOST-001.cpp" />
     <ClCompile Include="src\rows\QOL-SENSOR.cpp" />
     <ClCompile Include="src\rows\QOL-AP.cpp" />
     <ClCompile Include="src\rows\UI-BTLL1.cpp" />
