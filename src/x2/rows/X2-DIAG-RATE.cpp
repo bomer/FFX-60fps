@@ -41,6 +41,10 @@ static uint32_t g_btl_last = 0;
 static bool     g_hooked = false;
 static LARGE_INTEGER g_t0, g_f;
 static uint64_t g_kind[4], g_kind_last[4];
+// Frame time between invocations (stutter check, U 13/10/2026): min / sum / max and frames over 20 ms per window.
+static LARGE_INTEGER g_tprev;
+static double g_dt_min = 1e9, g_dt_max = 0, g_dt_sum = 0;
+static int    g_dt_n = 0, g_dt_long = 0;
 extern Row row_DIAGRATE;
 
 static bool install() {
@@ -57,6 +61,17 @@ static bool install() {
 
 static void pre() {
     g_kind[pacing_kind()]++;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (g_tprev.QuadPart) {
+        double dt = (double)(now.QuadPart - g_tprev.QuadPart) * 1000.0 / (double)g_f.QuadPart;
+        if (dt < g_dt_min) g_dt_min = dt;
+        if (dt > g_dt_max) g_dt_max = dt;
+        g_dt_sum += dt;
+        g_dt_n++;
+        if (dt > 20.0) g_dt_long++;
+    }
+    g_tprev = now;
     if (g_hooked) return;
     g_hooked = true;
     for (int i = 0; i < 4; i++) {
@@ -74,7 +89,7 @@ static void post() {
     double s = (double)(t.QuadPart - g_t0.QuadPart) / (double)g_f.QuadPart;
     if (s < 5.0) return;
     g_t0 = t;
-    char line[600];
+    char line[800];
     int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "X2-DIAG-RATE /s: inv LOGIC %.1f BUILD %.1f BACKLOG %.1f STOCK %.1f |",
                         (g_kind[0] - g_kind_last[0]) / s, (g_kind[1] - g_kind_last[1]) / s,
                         (g_kind[2] - g_kind_last[2]) / s, (g_kind[3] - g_kind_last[3]) / s);
@@ -90,6 +105,10 @@ static void post() {
         k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " battle counter %.1f", (c - g_btl_last) / s);
         g_btl_last = c;
     }
+    if (g_dt_n)
+        k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | frame ms min %.1f avg %.2f max %.1f, >20ms %d",
+                         g_dt_min, g_dt_sum / g_dt_n, g_dt_max, g_dt_long);
+    g_dt_min = 1e9; g_dt_max = 0; g_dt_sum = 0; g_dt_n = 0; g_dt_long = 0;
     log_line("%s", line);
 }
 
