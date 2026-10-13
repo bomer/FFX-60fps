@@ -2,7 +2,8 @@
 // X2-SMOOTH-003 (port of FFX SMOOTH-003, minimal first build): with X2-SMOOTH-002 the root moves at 60 Hz but the
 // skeleton pose still changes at 30 Hz. This row turns on the engine's half-rate motion switch and takes a second half
 // step of each actor's motion on render-only invocations, so limbs animate at 60 Hz at stock speed (needs X2-SMOOTH=1;
-// F7 toggles). Sub-switches as FFX: GATES, HOLD, LOOPGUARD, LOOPEND, SHORTLOOP (default 1), CLOTHHOLD (0 or 2, default 2).
+// F7 toggles). Sub-switches as FFX: GATES, HOLD, LOOPGUARD, LOOPEND, SHORTLOOP, ENDEXTRAP (default 1), CLOTHHOLD (0 or 2,
+// default 2).
 // Not ported in this build: KEYHOLD, SANITY, ENDEXTRAP, BLEND, CLOTH, CLOTHHOLD modes 1/3/4, DIAG*/STOCK-ID/TRACE.
 // FFX-2 changes (PORT-SMOOTH3.md §1-§7): step CALL pushes EDI (actor), the tween loop after it is inlined (cross-check
 // windows sa+0x280); the walk writes no skeleton dirty flag (FFX-2 has none) and dispatches at >= 150 bones (FFX > 199);
@@ -56,7 +57,7 @@ static volatile int32_t*  g_count = nullptr;    // actor count 0x01CC9600
 static uint8_t* g_site_step = nullptr, *g_site_noskel = nullptr, *g_site_seq = nullptr, *g_site_motev = nullptr;
 static bool g_patched = false;
 
-static int  g_gates = 1, g_hold = 1, g_loopguard = 1, g_shortloop = 1, g_loopend = 1;
+static int  g_gates = 1, g_hold = 1, g_loopguard = 1, g_shortloop = 1, g_loopend = 1, g_endextrap = 1;
 static int  g_kind = INV_STOCK;
 static bool g_half_on = false;                   // we wrote 1 into the switch
 static volatile bool g_in_step = false;          // inside one of OUR Ch_StepMotion calls
@@ -163,6 +164,69 @@ static bool safe_sync() {
     return true;
 }
 
+// ---------------------------------------------------------------- end extrapolation (X2-SMOOTH-003-ENDEXTRAP)
+// Port of FFX SMOOTH-003-ENDEXTRAP (U 11/10/2026 FFX: Tidus run/idle loop-end stutter). LOOPEND holds a loop's last
+// frame for one render-only frame, which repeats a pose once per loop cycle (U 13/10/2026 FFX-2: "character walk feel
+// stuttery"; D fps60x2.log 23:46: 55 LOOPEND holds per minute). Instead each bone rotation continues half a tick past
+// tick k from its last two logic values: k + (k - (k-1)) / 2. A channel that moved more than ENDX_MAX in the last
+// tick (flip, cut) keeps tick k. Play-once clamps are not extrapolated (FFX ENDEXTRAP-ONCE default 0: the next motion
+// is unknown). FFX-2 layout (PORT-SMOOTH3.md, S): bones ptr +0x334, bone stride 0x160, angles +0xE4/+0xE8/+0xEC,
+// mirror +0x30.
+static const uint32_t BONES = 0x334, BONE_STRIDE = 0x160;
+static const uint32_t BANG[3] = { 0xE4, 0xE8, 0xEC };
+static const int      MAXB = 1024;
+static const float    INV_2PI = 0.15915494f, ENDX_MAX = 0.08f;
+static float*   g_prev_ang = nullptr;            // MAXA * MAXB * 3, in turns: tick k-1
+static float*   g_cur_ang = nullptr;             // tick k
+static uint16_t g_ang_id[MAXA];
+static uint8_t  g_ang_n[MAXA];
+static volatile LONG g_endx = 0;
+
+static int bone_count(const uint8_t* a) {
+    const uint8_t* hdr = *(uint8_t* const*)(a + HDR);
+    if (!hdr) return 0;
+    int n = *(const uint16_t*)(hdr + HDR_BONES);
+    return (n > 0 && n <= MAXB) ? n : 0;
+}
+
+// After a logic step: tick k-1 <- tick k <- this pose.
+static void record_angles(int i, const uint8_t* a) {
+    if (!g_cur_ang || i < 0 || i >= MAXA) return;
+    int nb = bone_count(a);
+    const uint8_t* bones = *(uint8_t* const*)(a + BONES);
+    if (!nb || !bones) { g_ang_n[i] = 0; return; }
+    uint16_t id = *(const uint16_t*)a;
+    if (g_ang_id[i] != id) { g_ang_n[i] = 0; g_ang_id[i] = id; }
+    float* prev = g_prev_ang + (size_t)i * MAXB * 3;
+    float* cur = g_cur_ang + (size_t)i * MAXB * 3;
+    memcpy(prev, cur, sizeof(float) * nb * 3);
+    for (int b = 0; b < nb; b++)
+        for (int c = 0; c < 3; c++) cur[b * 3 + c] = *(const float*)(bones + b * BONE_STRIDE + BANG[c]) * INV_2PI;
+    if (g_ang_n[i] < 2) g_ang_n[i]++;
+}
+
+static void end_extrapolate(int i, uint8_t* a) {
+    if (!g_cur_ang || i < 0 || i >= MAXA || g_ang_n[i] < 2 || g_ang_id[i] != *(const uint16_t*)a) return;
+    int nb = bone_count(a);
+    uint8_t* bones = *(uint8_t**)(a + BONES);
+    if (!nb || !bones) return;
+    const float* prev = g_prev_ang + (size_t)i * MAXB * 3;
+    const float* cur = g_cur_ang + (size_t)i * MAXB * 3;
+    for (int b = 0; b < nb; b++)
+        for (int c = 0; c < 3; c++) {
+            float d = cur[b * 3 + c] - prev[b * 3 + c];
+            d -= (float)(int)d;                          // shortest signed difference in turns
+            if (d > 0.5f) d -= 1.0f;
+            if (d < -0.5f) d += 1.0f;
+            if (d > ENDX_MAX || d < -ENDX_MAX) continue;
+            float v = (cur[b * 3 + c] + 0.5f * d) * 6.2831853f;
+            *(float*)(bones + b * BONE_STRIDE + BANG[c]) = v;
+            *(float*)(bones + b * BONE_STRIDE + BANG[c] + 0x30) = v;
+        }
+    if (InterlockedIncrement(&g_endx) == 1)
+        log_line("X2-SMOOTH-003: first loop-end half-tick extrapolation (ENDEXTRAP), id 0x%04X", *(const uint16_t*)a);
+}
+
 // SHORTLOOP: a looping motion of at most one frame (e.g. an enemy hold pose) is only ever sampled at whole frames at
 // stock; a half-frame sample twists the body, so such actors run exactly as stock.
 static bool short_loop(const uint8_t* a) {
@@ -199,9 +263,11 @@ static void __cdecl h_step(uint8_t* a, int full) {
         g_step(a, full);
         *g_half = 1;
         InterlockedIncrement(&g_stock_steps);
+        if (full && g_endextrap) __try { record_angles(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         return;
     }
     g_step(a, full);
+    if (full && g_endextrap) __try { record_angles(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (i >= 0 && *g_half != 0) { g_debt[i] = 1; g_debt_id[i] = *(uint16_t*)a; }
 }
 
@@ -249,7 +315,7 @@ static int32_t guard_clock(const uint8_t* a, int32_t c, int* kind) {
 }
 
 // The render-only full step of one actor (bit 24 already set). Returns false on a fault (the walk aborts).
-static bool walk_step(uint8_t* a, uint32_t fl) {
+static bool walk_step(int i, uint8_t* a, uint32_t fl) {
     int32_t c0 = *(int32_t*)(a + M_CLOCK);
     int kind = 0;
     int32_t cs = c0;
@@ -261,6 +327,7 @@ static bool walk_step(uint8_t* a, uint32_t fl) {
         *(int32_t*)(a + M_LEN) > 0 && (cs >> 8) >= (*(int32_t*)(a + M_END) >> 8)) {
         if (!safe_step(a, 0)) return false;               // clock only: pose stays at tick k
         InterlockedIncrement(&g_loopend_holds);
+        if (g_endextrap) __try { end_extrapolate(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         return true;
     }
     if (kind == 3) {
@@ -309,7 +376,7 @@ static void walk() {
             if (g_debt_id[i] != *(uint16_t*)a) goto next;                     // slot reused: drop the stale debt
             if (g_shortloop && short_loop(a)) { g_debt[i] = 1; goto next; }  // stock from the next logic step
             *(uint32_t*)(a + FLAGS) = fl | F_STEP;
-            if (!walk_step(a, fl)) return;
+            if (!walk_step(i, a, fl)) return;
             g_walked[i] = 1;
             g_walked_inv = true;
             InterlockedIncrement(&g_stepped);
@@ -404,9 +471,9 @@ static void post() {
     if (g_walks - last >= 1800) {
         last = g_walks;
         log_line("X2-SMOOTH-003: walks=%ld stepped=%ld batches=%ld pays=%ld gated(seq=%ld motev=%ld) "
-                 "loopguard(wrap=%ld clamp=%ld hold=%ld) loopend_holds=%ld stock_steps=%ld cloth_held=%ld half=%d live=%d",
+                 "loopguard(wrap=%ld clamp=%ld hold=%ld) loopend_holds=%ld endx=%ld stock_steps=%ld cloth_held=%ld half=%d live=%d",
                  g_walks, g_stepped, g_batches, g_pays, g_gated_seq, g_gated_motev, g_guard_wrap, g_guard_clamp,
-                 g_guard_hold, g_loopend_holds, g_stock_steps, (LONG)g_cloth_held, *g_half, smooth_live(3));
+                 g_guard_hold, g_loopend_holds, (LONG)g_endx, g_stock_steps, (LONG)g_cloth_held, *g_half, smooth_live(3));
     }
     static LONG reported_s = 0;
     if (!reported_s && g_stock_steps > 0) {
@@ -488,6 +555,12 @@ static bool install() {
     g_hold = config_row("X2-SMOOTH-003-HOLD", 1);
     g_loopguard = config_row("X2-SMOOTH-003-LOOPGUARD", 1);
     g_loopend = config_row("X2-SMOOTH-003-LOOPEND", 1);
+    g_endextrap = config_row("X2-SMOOTH-003-ENDEXTRAP", 1);
+    if (g_endextrap) {
+        g_prev_ang = (float*)calloc((size_t)MAXA * MAXB * 3, sizeof(float));
+        g_cur_ang = (float*)calloc((size_t)MAXA * MAXB * 3, sizeof(float));
+        if (!g_prev_ang || !g_cur_ang) { g_endextrap = 0; log_line("  X2-SMOOTH-003: ENDEXTRAP off (out of memory)"); }
+    }
     g_shortloop = config_row("X2-SMOOTH-003-SHORTLOOP", 1);
     g_clothhold = config_row("X2-SMOOTH-003-CLOTHHOLD", 2);
     if (g_clothhold != 0 && g_clothhold != 2) {
