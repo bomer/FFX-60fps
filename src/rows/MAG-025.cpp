@@ -38,6 +38,21 @@ static void*    g_gate_tramp = nullptr;
 static uint8_t* g_exe_ret = nullptr;             // return address of the EXE pass-1 walk call (0x8006C4)
 static bool     g_patched = false;
 
+// MAG-025-FOLLOWGUARD: follow call 0x80D994 (movzx eax,al / push edi / mov eax,[eax*4+0xC492C8] / push esi /
+// call eax), after the integration block, runs on every walk. Follow type handler FUN_00815670 resolves the target
+// unit (FUN_00801060, pure) and reads [target+0xBC] without a check: magic_0169 (Impulse) crashed there on a
+// render-only DLL walk, target +0xBC NULL (13/10/2026). The guard skips that one call when the pointer is NULL.
+typedef uint8_t*(__cdecl* find_unit_t)(uint8_t* ctx, uint8_t* obj, uint16_t id);
+static uint8_t*    g_fcall = nullptr;            // 0x80D994
+static void*       g_fcall_after = nullptr;      // 0x80D9A5 inc word [esi+0x218]
+static void*       g_fcall_tramp = nullptr;
+static uint8_t**   g_ftable = nullptr;           // 0xC492C8 follow handler table (12 entries)
+static uint8_t*    g_fattach = nullptr;          // FUN_00815670
+static find_unit_t g_find_unit = nullptr;        // FUN_00801060
+static int         g_followguard = 1;            // MAG-025-FOLLOWGUARD
+static volatile uint8_t g_fskip = 0;
+static volatile LONG g_fskipped = 0;
+
 // [rows]
 static int g_mode_exe = 3;                       // MAG-025-MODE: EXE pass-1 walk (0 = untouched)
 static int g_mode_dll = 3;                       // MAG-025-DLLMODE: DLL-called walks (0 = untouched)
@@ -194,6 +209,40 @@ __declspec(naked) static void h_gate() {
     }
 }
 
+static void __cdecl on_follow(uint32_t type, uint8_t* unit) {
+    g_fskip = 0;
+    if (g_ftable[type] != g_fattach) return;
+    uint8_t* obj = *(uint8_t**)(unit + 0x220);
+    uint16_t id = *(uint16_t*)(obj + 0xA0);
+    uint8_t* base = *(uint8_t**)(unit + 0x320);
+    uint8_t* t = g_find_unit(unit + 0x300, obj, id);
+    if (*(void**)(t + 0xBC)) return;
+    g_fskip = 1;
+    LONG n = InterlockedIncrement(&g_fskipped);
+    if (n <= 20 || n % 600 == 0)
+        log_line("MAG-025-FOLLOWGUARD: follow skipped (#%ld): target +0xBC NULL; kind %d hold %d src %s, unit #%d id 0x%04X, "
+                 "target id 0x%04X -> #%d%s, group %d/%d",
+                 n, pacing_kind(), g_hold, g_src ? "DLL" : "EXE", (int)((obj - base) >> 8), *(uint16_t*)(obj + 0x1A),
+                 id, (int)((t - base) >> 8), t == base ? " (not found)" : "", obj[0x1E], t[0x1E]);
+}
+
+__declspec(naked) static void h_fcall() {
+    __asm {
+        pushad
+        push esi
+        movzx eax, al
+        push eax
+        call on_follow
+        add esp, 8
+        popad
+        cmp byte ptr [g_fskip], 0
+        jne skip
+        jmp dword ptr [g_fcall_tramp]
+    skip:
+        jmp dword ptr [g_fcall_after]
+    }
+}
+
 static void held_walk(int mode, uint8_t src, uint32_t unit_ctx, uint32_t pass) {
     InterlockedIncrement(&g_held[src]);
     uint8_t saved = g_hold, saved_src = g_src;
@@ -256,6 +305,32 @@ static bool install() {
     g_gate = g_head + 0x1EE;
     g_gate_after = g_gate + 7;
 
+    g_followguard = config_row("MAG-025-FOLLOWGUARD", 1);
+    if (g_followguard) {
+        // mov al,[ebx+0xBA] / test al,al / jz / cmp al,0xC / jnb / movzx eax,al / push edi / mov eax,[eax*4+table] /
+        // push esi / call eax / add esp,8 / inc word [esi+0x218]
+        uint8_t* site = sig_find_unique("MAG-025-FOLLOWGUARD follow call",
+            "8A 83 BA 00 00 00 84 C0 74 15 3C 0C 73 11 0F B6 C0 57 8B 04 85 ?? ?? ?? ?? 56 FF D0 83 C4 08 66 FF 86 18 02 00 00",
+            0x80D986);
+        // FUN_00815670: obj = [unit+0x220]; t = FUN_00801060(unit+0x300, obj, obj+0xA0); esi = [t+0xBC]; movsx eax,[esi]
+        uint8_t* fn = sig_find_unique("MAG-025-FOLLOWGUARD attach handler",
+            "55 8B EC 53 8B 5D 08 56 57 8B BB 20 02 00 00 0F B7 87 A0 00 00 00 50 8D 83 00 03 00 00 57 50 E8 ?? ?? ?? ?? "
+            "83 C4 0C 8B B0 BC 00 00 00 0F BF 06", 0x815670);
+        uint8_t* find = fn ? call_target(fn + 0x1F) : nullptr;
+        if (!site || !find || !sig_match(find, "55 8B EC 56 8B 75 0C 57 66 8B 7D 10 66 85 FF 79 4F")) {
+            log_line("  MAG-025-FOLLOWGUARD: sites not found - guard off");
+            g_followguard = 0;
+        } else {
+            g_fcall = site + 0xE;
+            g_fcall_after = site + 0x1F;
+            g_ftable = (uint8_t**)read_abs(site + 0x15);
+            g_fattach = fn;
+            g_find_unit = (find_unit_t)find;
+            log_line("  MAG-025-FOLLOWGUARD: follow call gva=0x%08X, table gva=0x%08X, attach handler gva=0x%08X, "
+                     "unit lookup gva=0x%08X", rt_to_gva_exe(g_fcall), rt_to_gva_exe((uint8_t*)g_ftable),
+                     rt_to_gva_exe(fn), rt_to_gva_exe(find));
+        }
+    }
     g_mode_exe = config_row("MAG-025-MODE", 3);
     g_mode_dll = config_row("MAG-025-DLLMODE", 3);
     if (g_mode_exe < 0 || g_mode_exe > 3) g_mode_exe = 3;
@@ -315,6 +390,8 @@ static void pre() {
         return;
     }
     log_line("MAG-025: walker entry and 6 inner sites hooked on the game thread");
+    if (g_followguard && hook_entry("MAG-025-FOLLOWGUARD", g_fcall, (void*)&h_fcall, &g_fcall_tramp))
+        log_line("MAG-025-FOLLOWGUARD: follow call hooked");
 }
 
 static void log_ops(int src) {
