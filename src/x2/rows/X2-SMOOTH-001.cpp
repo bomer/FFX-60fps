@@ -143,16 +143,17 @@ static bool  g_f9_prev = false;
 static float g_trace_last[3];
 static bool  g_trace_have = false;
 
-static void trace_frame(int vp) {
-    if (vp != 0 || g_trace_left <= 0) return;
+// Once per invocation, at post(): the view the frame was drawn with (viewport 0 finalizes run 3 times per frame).
+static void trace_frame() {
+    if (g_trace_left <= 0) return;
     float inv[16];
     if (!smooth_affine_inverse(g_view, inv)) return;
     float dx = 0, dy = 0, dz = 0;
     if (g_trace_have) { dx = inv[12] - g_trace_last[0]; dy = inv[13] - g_trace_last[1]; dz = inv[14] - g_trace_last[2]; }
     bool ours = g_written && memcmp(g_view, g_out, 64) == 0;
-    log_line("X2-SMOOTH-001 trace: %c %s eye (%.2f, %.2f, %.2f) step %.3f | fwd (%.3f, %.3f, %.3f) src %d",
+    log_line("X2-SMOOTH-001 trace: %c %s eye (%.2f, %.2f, %.2f) step %.3f | fwd (%.3f, %.3f, %.3f) src %d smooth %s",
              "LRBS"[g_kind & 3], ours ? "ours" : "game", inv[12], inv[13], inv[14], sqrtf(dx * dx + dy * dy + dz * dz),
-             inv[8], inv[9], inv[10], src_tag());
+             inv[8], inv[9], inv[10], src_tag(), smooth_live(1) ? "on" : "OFF");
     g_trace_last[0] = inv[12]; g_trace_last[1] = inv[13]; g_trace_last[2] = inv[14];
     g_trace_have = true;
     if (--g_trace_left == 0) log_line("X2-SMOOTH-001 trace: end");
@@ -164,7 +165,7 @@ static int __cdecl h_finalize(int vp, int pass) {
     int r = g_finalize(vp, pass);
     g_cur_vp = -1;
     if (r != 0 || !rec || g_disabled || !row_SMOOTH001.on) return r;
-    __try { on_call(vp); trace_frame(vp); }
+    __try { on_call(vp); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("X2-SMOOTH-001: fault 0x%08lX in the finalize stub - row off", GetExceptionCode());
         row_SMOOTH001.on = 0;
@@ -202,6 +203,7 @@ static void pre() {
 }
 
 static void post() {
+    __try { trace_frame(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (g_kind == INV_LOGIC || g_kind == INV_BACKLOG) {
         for (int i = 0; i < 3; i++) {
             CamHist& h = g_h[i];
