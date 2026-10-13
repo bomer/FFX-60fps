@@ -62,6 +62,22 @@ static LONG  g_logic_calls = 0, g_skip_hist = 0;
 // the issue now" after limbs; frame pacing clean, D fps60x2.log 21:05: avg 16.68 ms). Same idea as X2-SMOOTH-002-
 // RENDERHOLD. Logged: how often and how far the view moved on render-only frames (proves or refutes the cause).
 static int   g_renderhold = 1;
+// X2-SMOOTH-001-CUTDEG (default 20): a view that turned more than this many degrees in one tick is a camera cut and
+// snaps (the shared interpolator only cuts above 60 deg). D 13/10/2026 F9 trace: normal turning 0.2-0.3 deg per frame;
+// a 44 deg angle switch was blended into a 22 deg in-between frame (one-frame whip at camera cuts).
+static float g_cut_cos = 0.9396926f;            // cos(20 deg)
+static LONG  g_rot_cuts = 0;
+
+// Cosine of the turn between two view matrices (camera forward = row 2 of the inverse).
+static bool view_turn_cos(const float* a, const float* b, float* c) {
+    float ia[16], ib[16];
+    if (!smooth_affine_inverse(a, ia) || !smooth_affine_inverse(b, ib)) return false;
+    float la = sqrtf(ia[8] * ia[8] + ia[9] * ia[9] + ia[10] * ia[10]);
+    float lb = sqrtf(ib[8] * ib[8] + ib[9] * ib[9] + ib[10] * ib[10]);
+    if (!(la > 1e-6f) || !(lb > 1e-6f)) return false;
+    *c = (ia[8] * ib[8] + ia[9] * ib[9] + ia[10] * ib[10]) / (la * lb);
+    return true;
+}
 static LONG  g_rh_checked = 0, g_rh_held = 0;
 static float g_rh_sum = 0, g_rh_max = 0;
 
@@ -122,6 +138,8 @@ static void on_call(int vp) {
         }
         if (h.prevset[0] != h.pendset[0] || h.prevset[1] != h.pendset[1]) fov_mid = true;
     }
+    float tc;
+    if (view_turn_cos(h.prev, g_view, &tc) && tc < g_cut_cos) { InterlockedIncrement(&g_rot_cuts); return; }   // angle cut
     float out[16];
     if (!smooth_interp_view(h.prev, g_view, 0.5f, SMOOTH_CUT_DIST, out)) { InterlockedIncrement(&g_st.interp_cut); return; }
     if (fov_mid) {
@@ -219,9 +237,9 @@ static void post() {
     static LONG last = 0;
     if (g_logic_calls - last >= 1800) {
         last = g_logic_calls;
-        log_line("X2-SMOOTH-001: logic calls=%ld interp=%ld cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld | renderhold "
+        log_line("X2-SMOOTH-001: logic calls=%ld interp=%ld cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld rot_cuts=%ld | renderhold "
                  "checked=%ld held=%ld eye avg %.2f max %.2f | src=%d live=%d",
-                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, g_rh_checked, g_rh_held,
+                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, g_rot_cuts, g_rh_checked, g_rh_held,
                  g_rh_held ? g_rh_sum / g_rh_held : 0.0f, g_rh_max, src_tag(), smooth_live(1));
     }
     static LONG reported = 0;
@@ -282,6 +300,7 @@ static bool install() {
     g_commit = (commit_t)commit;
     g_fov = config_row("X2-SMOOTH-001-FOV", 1);
     g_renderhold = config_row("X2-SMOOTH-001-RENDERHOLD", 1);
+    g_cut_cos = cosf((float)config_row("X2-SMOOTH-001-CUTDEG", 20) * 0.017453293f);
     uint8_t* fs = g_fov ? sig_find("X2-SMOOTH-001-FOV setters",
         "8D 45 CC 50 E8 ?? ?? ?? ?? 8D 45 D0 50 E8 ?? ?? ?? ?? 83 C4 08 83 3D", 0x6504DF) : nullptr;
     if (g_fov) {
