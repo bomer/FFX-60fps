@@ -57,6 +57,13 @@ static bool  g_written = false, g_committed = false;
 static float g_orig[16], g_out[16];
 static SmoothStats g_st;
 static LONG  g_logic_calls = 0, g_skip_hist = 0;
+// X2-SMOOTH-001-RENDERHOLD (default 1): a render-only invocation whose rebuilt view differs from tick k (the game moved
+// the camera outside a logic tick) draws tick k, so the drawn sequence stays k-0.5, k, k+0.5 (U 13/10/2026: "camera is
+// the issue now" after limbs; frame pacing clean, D fps60x2.log 21:05: avg 16.68 ms). Same idea as X2-SMOOTH-002-
+// RENDERHOLD. Logged: how often and how far the view moved on render-only frames (proves or refutes the cause).
+static int   g_renderhold = 1;
+static LONG  g_rh_checked = 0, g_rh_held = 0;
+static float g_rh_sum = 0, g_rh_max = 0;
 
 static int src_tag() { return *g_src3 ? 3 : (*g_src2 ? 2 : 1); }
 
@@ -68,8 +75,29 @@ static void write_view(const float* out, int tag) {
     if (tag == 3 || tag == 1) { g_commit(g_view, 0); g_committed = true; }
 }
 
+static void render_hold(int vp) {
+    CamHist& h = g_h[vp];
+    if (!g_renderhold || !h.valid || !smooth_live(1) || *g_dbg) return;
+    int tag = src_tag();
+    if (tag != h.tag || (tag == 1 && vp == 1)) return;
+    if (g_written && memcmp(g_view, g_out, 64) == 0) return;       // already ours this invocation
+    InterlockedIncrement(&g_rh_checked);
+    if (memcmp(g_view, h.prev, 64) == 0) return;                 // the view is tick k: nothing to do
+    float ia[16], ib[16];
+    if (!smooth_affine_inverse(g_view, ia) || !smooth_affine_inverse(h.prev, ib)) return;
+    float dx = ia[12] - ib[12], dy = ia[13] - ib[13], dz = ia[14] - ib[14];
+    float d = sqrtf(dx * dx + dy * dy + dz * dz);                // eye moved this far outside a logic tick
+    if (d > SMOOTH_CUT_DIST) return;                             // a cut on a render-only frame: let it through
+    g_rh_sum += d;
+    if (d > g_rh_max) g_rh_max = d;
+    write_view(h.prev, tag);
+    if (InterlockedIncrement(&g_rh_held) == 1)
+        log_line("X2-SMOOTH-001-RENDERHOLD: first render-only view that left tick k (eye moved %.2f, source %d) - drawn at tick k", d, tag);
+}
+
 static void on_call(int vp) {
-    if (g_kind != INV_LOGIC && g_kind != INV_BACKLOG) return;    // render-only frames draw tick k
+    if (g_kind == INV_BUILD) { render_hold(vp); return; }        // render-only frames draw tick k
+    if (g_kind != INV_LOGIC && g_kind != INV_BACKLOG) return;
     CamHist& h = g_h[vp];
     int tag = src_tag();
     bool ours = g_written && memcmp(g_view, g_out, 64) == 0;
@@ -158,8 +186,10 @@ static void post() {
     static LONG last = 0;
     if (g_logic_calls - last >= 1800) {
         last = g_logic_calls;
-        log_line("X2-SMOOTH-001: logic calls=%ld interp=%ld cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld | src=%d live=%d",
-                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, src_tag(), smooth_live(1));
+        log_line("X2-SMOOTH-001: logic calls=%ld interp=%ld cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld | renderhold "
+                 "checked=%ld held=%ld eye avg %.2f max %.2f | src=%d live=%d",
+                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, g_rh_checked, g_rh_held,
+                 g_rh_held ? g_rh_sum / g_rh_held : 0.0f, g_rh_max, src_tag(), smooth_live(1));
     }
     static LONG reported = 0;
     if (!reported && g_st.interp > 0) {
@@ -218,6 +248,7 @@ static bool install() {
     g_finalize = (finalize_t)fin;
     g_commit = (commit_t)commit;
     g_fov = config_row("X2-SMOOTH-001-FOV", 1);
+    g_renderhold = config_row("X2-SMOOTH-001-RENDERHOLD", 1);
     uint8_t* fs = g_fov ? sig_find("X2-SMOOTH-001-FOV setters",
         "8D 45 CC 50 E8 ?? ?? ?? ?? 8D 45 D0 50 E8 ?? ?? ?? ?? 83 C4 08 83 3D", 0x6504DF) : nullptr;
     if (g_fov) {
