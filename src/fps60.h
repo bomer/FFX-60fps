@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// fps60: the 60fps mod for FFX HD, a dbghelp.dll proxy. pacing.cpp makes every other Sg_MainLoop invocation
+// fps60: the 60fps mod for FFX HD (fps60_ffx.dll, loaded by the shared loader src/loader). pacing.cpp makes every other Sg_MainLoop invocation
 // render-only; rollback.cpp and rows.cpp keep game state stepping once per logic tick.
 // Addresses: gva = Ghidra VA, rt = runtime; every address comes from sigs.cpp, none is hardcoded.
 // Details: docs/fps60/architecture.md
@@ -22,7 +22,7 @@ enum AltBacklog { ALT_BACKLOG_LOGIC = 0, ALT_BACKLOG_TOGGLE = 1 };
 enum ExecMethod { EXEC_SETTER = 0, EXEC_BYTE = 1 };
 
 struct Config {
-    int enabled;                 // 0 = pure dbghelp forwarder
+    int enabled;                 // 0 = nothing installed (the loader still forwards dbghelp)
     int pacing;                  // 1 = 60 Hz (divider 1 + exec alternation), 0 = stock pacing
     int alt_backlog;             // skip-render backlog invocations: logic = exec 1, parity unchanged
     int exec_method;

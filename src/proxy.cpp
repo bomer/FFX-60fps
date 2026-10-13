@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Proxy shell: ships as dbghelp.dll next to FFX.exe, forwards dbghelp to System32, and starts fps60 once
-// the Steam DRM has unpacked the game code (gives up after unpack_timeout_s, leaving the game untouched).
+// fps60_ffx.dll entry: loaded by the shared loader (dbghelp.dll, src/loader) when the host is FFX.exe. Starts fps60
+// once the Steam DRM has unpacked the game code (gives up after unpack_timeout_s, leaving the game untouched), and
+// adds the crash line to the game's dump through the loader's mod_minidump_pre call.
 // Details: docs/fps60/proxy.md
 #include "fps60.h"
 #include <stdio.h>
@@ -70,25 +71,17 @@ static void log_crash(void* exception_param) {
     }
 }
 
-// Set in DllMain when the host is FFX.exe. Any other host (FFX-2.exe, FFX&X-2_Will.exe also load this
-// dbghelp.dll) gets a pure forwarder: no init, no crash line, no dump flags.
+// Set in DllMain when the host is FFX.exe (the loader only loads this DLL there; kept as a guard).
 static bool g_host_ffx = false;
 
-extern "C" BOOL WINAPI fp_MiniDumpWriteDump(
-    HANDLE hProcess, DWORD ProcessId, HANDLE hFile, int DumpType,
-    void* ExceptionParam, void* UserStreamParam, void* CallbackParam) {
-    MiniDumpWriteDump_t real = resolve_real_minidump();
-    if (!real) {
-        SetLastError(ERROR_PROC_NOT_FOUND);
-        return FALSE;
-    }
-    if (!g_host_ffx) return real(hProcess, ProcessId, hFile, DumpType, ExceptionParam, UserStreamParam, CallbackParam);
-    __try { log_crash(ExceptionParam); }
+// Called by the loader (SEH-guarded) before the game's crash dump is written.
+extern "C" void __cdecl mod_minidump_pre(void* exception_param, int* dump_type) {
+    if (!g_host_ffx) return;
+    __try { log_crash(exception_param); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
     // Diagnostic ([fps60] crash_dump_mem=1): the game's crash dump also gets heap and module data
     // (MiniDumpWithDataSegs 0x1 | WithPrivateReadWriteMemory 0x200 | WithFullMemoryInfo 0x800).
-    if (g_cfg.crash_dump_mem) DumpType |= 0x1 | 0x200 | 0x800;
-    return real(hProcess, ProcessId, hFile, DumpType, ExceptionParam, UserStreamParam, CallbackParam);
+    if (g_cfg.crash_dump_mem && dump_type) *dump_type |= 0x1 | 0x200 | 0x800;
 }
 
 static bool probe_ready() {
@@ -115,7 +108,7 @@ static DWORD WINAPI init_thread(LPVOID) {
     log_line("fps60 init: exe base=%p size=0x%X, enabled=%d pacing=%d rollback=%d", exe_base(), exe_size(),
              g_cfg.enabled, g_cfg.pacing, g_cfg.rollback);
     if (!g_cfg.enabled) {
-        log_line("fps60 disabled in fps60.ini - pure dbghelp forwarder.");
+        log_line("fps60 disabled in fps60.ini - nothing installed.");
         return 0;
     }
 
@@ -167,7 +160,7 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
         if (n == 0 || n >= MAX_PATH) return TRUE;
         const wchar_t* name = exe;
         for (const wchar_t* p = exe; *p; p++) if (*p == L'\\' || *p == L'/') name = p + 1;
-        if (lstrcmpiW(name, L"FFX.exe") != 0) return TRUE;   // not our game: pure forwarder
+        if (lstrcmpiW(name, L"FFX.exe") != 0) return TRUE;   // not FFX: stay inert
         g_host_ffx = true;
 
         HANDLE t = CreateThread(nullptr, 0, init_thread, nullptr, 0, nullptr);

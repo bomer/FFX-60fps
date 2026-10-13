@@ -40,8 +40,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <!-- Diagnostic drop-in: ships as dbghelp.dll next to FFX.exe (FFX.exe's only dbghelp import is MiniDumpWriteDump). -->
-    <TargetName>dbghelp</TargetName>
+    <!-- FFX mod DLL: the shared loader (loader.vcxproj, ships as dbghelp.dll) loads it when the host is FFX.exe. -->
+    <TargetName>fps60_ffx</TargetName>
     <OutDir>$(MSBuildThisFileDirectory)artifacts\$(Configuration)\</OutDir>
     <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\$(Configuration)\</IntDir>
   </PropertyGroup>
@@ -148,7 +148,6 @@
     <ClCompile Include="src\rows\SMOOTH-001.cpp" />
     <ClCompile Include="src\rows\SMOOTH-002.cpp" />
     <ClCompile Include="src\rows\SMOOTH-003.cpp" />
-    <ClCompile Include="src\forwards.cpp" />
     <ClCompile Include="src\entry_hook.cpp" />
     <ClCompile Include="src\magic_mods.cpp" />
     <ClCompile Include="src\reload.cpp" />

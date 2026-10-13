@@ -9,12 +9,13 @@ also fixes the effects, menus and inputs that would otherwise run at double spee
 ## Install
 
 1. Download the release zip.
-2. Copy `dbghelp.dll` and `fps60.ini` into the game folder, next to `FFX.exe`.
+2. Copy `dbghelp.dll`, `fps60_ffx.dll` and `fps60.ini` into the game folder, next to `FFX.exe`.
 3. Start the game from Steam.
 
-To uninstall, delete `dbghelp.dll`.
+To uninstall, delete `fps60_ffx.dll` (FFX then runs stock), or also `dbghelp.dll` if no other game mod uses it.
 
-- **FFX-2:** not affected. `FFX-2.exe` loads the same file, but the mod stays inactive there.
+- **`dbghelp.dll` is a small shared loader.** It loads `fps60_ffx.dll` in FFX and `fps60_ffx2.dll` in FFX-2, when
+  that file is present; otherwise the game runs stock. FFX-2 is not affected unless its own mod DLL is installed.
 - **Other `dbghelp.dll` mods:** they can't be installed at the same time, since they use the same file name.
 
 ## Settings
@@ -41,10 +42,12 @@ diagnostic switches) is the development copy, `fps60.ini` in the source tree. `s
 Visual Studio 2026 (toolset v145), Win32:
 
 ```
+MSBuild loader.vcxproj /p:Configuration=Release /p:Platform=Win32
 MSBuild fps60.vcxproj /p:Configuration=Release /p:Platform=Win32
 ```
 
-The output is `artifacts/Release/dbghelp.dll`.
+The outputs are `artifacts/loader/Release/dbghelp.dll` (the shared loader) and `artifacts/Release/fps60_ffx.dll`.
+`x2.vcxproj` builds `fps60_ffx2.dll`, the FFX-2 mod (work in progress).
 
 ## License
 

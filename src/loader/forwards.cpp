@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Generated: forwards every named export of the 32-bit system dbghelp.dll (SysWOW64, 250 names)
-// except MiniDumpWriteDump (proxy.cpp). Steam injects CSERHelper.dll, which imports Sym*/StackWalk64
+// except MiniDumpWriteDump (loader.cpp). Steam injects CSERHelper.dll, which imports Sym*/StackWalk64
 // from dbghelp and binds to this proxy because it is already loaded; without these the game
 // fails to launch ("SymSetOptions could not be located"). System32 is redirected to SysWOW64 for
 // a 32-bit process.
