@@ -57,7 +57,7 @@ static volatile int32_t*  g_count = nullptr;    // actor count 0x01CC9600
 static uint8_t* g_site_step = nullptr, *g_site_noskel = nullptr, *g_site_seq = nullptr, *g_site_motev = nullptr;
 static bool g_patched = false;
 
-static int  g_gates = 1, g_hold = 1, g_loopguard = 1, g_shortloop = 1, g_loopend = 1, g_endextrap = 1;
+static int  g_gates = 1, g_hold = 1, g_loopguard = 1, g_shortloop = 1, g_loopend = 1, g_endextrap = 1, g_endextrap_once = 1;
 static int  g_kind = INV_STOCK;
 static bool g_half_on = false;                   // we wrote 1 into the switch
 static volatile bool g_in_step = false;          // inside one of OUR Ch_StepMotion calls
@@ -337,6 +337,13 @@ static bool walk_step(int i, uint8_t* a, uint32_t fl) {
     }
     if (kind) *(int32_t*)(a + M_CLOCK) = cs;
     bool ok = safe_step(a, 1);
+    // X2-SMOOTH-003-ENDEXTRAP-ONCE (default 1 in FFX-2): a play-once motion clamped at its last frame (kind 2) repeats
+    // that pose on the render-only frame; walks/runs are chains of play-once strides (FFX: Tidus's run, 28 frames),
+    // so every stride end hitched (U 13/10/2026 "walk still stuttery" with LOOPEND extrapolation alone; D fps60x2.log
+    // 23:46: clamp=190 vs loopend 55 per 2 min). Extrapolate only when the logic tick already showed the last frame.
+    // FFX turned this off (Bahamut's hit-motion end guessed wrong): set 0 here if a motion end overshoots.
+    if (ok && kind == 2 && g_endextrap && g_endextrap_once && c0 >= (*(int32_t*)(a + M_END) & ~0xFF))
+        __try { end_extrapolate(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (kind) {
         // Unwrapped clock + the half step just added: the next logic tick wraps / counts down exactly as stock.
         *(int32_t*)(a + M_CLOCK) = c0 + (*(int32_t*)(a + M_CLOCK) - cs);
@@ -556,6 +563,7 @@ static bool install() {
     g_loopguard = config_row("X2-SMOOTH-003-LOOPGUARD", 1);
     g_loopend = config_row("X2-SMOOTH-003-LOOPEND", 1);
     g_endextrap = config_row("X2-SMOOTH-003-ENDEXTRAP", 1);
+    g_endextrap_once = config_row("X2-SMOOTH-003-ENDEXTRAP-ONCE", 1);
     if (g_endextrap) {
         g_prev_ang = (float*)calloc((size_t)MAXA * MAXB * 3, sizeof(float));
         g_cur_ang = (float*)calloc((size_t)MAXA * MAXB * 3, sizeof(float));
