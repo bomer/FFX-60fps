@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_DEVBISECT;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -23,6 +23,7 @@ static Row* g_rows[] = {
     &row_MAG006,                                 // rows/X2-MAG-006.cpp
     &row_UI014,                                  // rows/X2-UI-014.cpp
     &row_TEXANIM001,                             // rows/X2-TEXANIM-001.cpp
+    &row_MAG016,                                 // rows/X2-MAG-016.cpp (record driver, 79 magic DLLs)
     &row_MENU001,                                // rows/X2-MENU-001.cpp
     &row_TITLE001,                               // rows/X2-TITLE-001.cpp
     &row_SMOOTH001,                              // rows/X2-SMOOTH-001.cpp (60 Hz promotion)
