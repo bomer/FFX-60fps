@@ -135,13 +135,36 @@ static void on_call(int vp) {
     InterlockedIncrement(&g_st.interp);
 }
 
+// X2-SMOOTH-001 trace (F9, always available): the next 240 viewport-0 finalizes log the drawn eye position, the
+// invocation kind (L = logic, R = render-only, B = backlog, S = stock), whether this row wrote the view (interp / hold)
+// and the step from the previous drawn frame. U 13/10/2026: camera still judders after the render hold ("maybe less").
+static LONG  g_trace_left = 0;
+static bool  g_f9_prev = false;
+static float g_trace_last[3];
+static bool  g_trace_have = false;
+
+static void trace_frame(int vp) {
+    if (vp != 0 || g_trace_left <= 0) return;
+    float inv[16];
+    if (!smooth_affine_inverse(g_view, inv)) return;
+    float dx = 0, dy = 0, dz = 0;
+    if (g_trace_have) { dx = inv[12] - g_trace_last[0]; dy = inv[13] - g_trace_last[1]; dz = inv[14] - g_trace_last[2]; }
+    bool ours = g_written && memcmp(g_view, g_out, 64) == 0;
+    log_line("X2-SMOOTH-001 trace: %c %s eye (%.2f, %.2f, %.2f) step %.3f | fwd (%.3f, %.3f, %.3f) src %d",
+             "LRBS"[g_kind & 3], ours ? "ours" : "game", inv[12], inv[13], inv[14], sqrtf(dx * dx + dy * dy + dz * dz),
+             inv[8], inv[9], inv[10], src_tag());
+    g_trace_last[0] = inv[12]; g_trace_last[1] = inv[13]; g_trace_last[2] = inv[14];
+    g_trace_have = true;
+    if (--g_trace_left == 0) log_line("X2-SMOOTH-001 trace: end");
+}
+
 static int __cdecl h_finalize(int vp, int pass) {
     bool rec = vp >= 0 && vp <= 2;
     if (rec) { g_cur_vp = vp; g_rec_ok[vp] = false; }
     int r = g_finalize(vp, pass);
     g_cur_vp = -1;
     if (r != 0 || !rec || g_disabled || !row_SMOOTH001.on) return r;
-    __try { on_call(vp); }
+    __try { on_call(vp); trace_frame(vp); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("X2-SMOOTH-001: fault 0x%08lX in the finalize stub - row off", GetExceptionCode());
         row_SMOOTH001.on = 0;
@@ -161,6 +184,14 @@ static void restore() {
 
 static void pre() {
     smooth_poll_hotkey();
+    bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    if (f9 && !g_f9_prev && g_trace_left <= 0) {
+        HWND fg = GetForegroundWindow();
+        DWORD pid = 0;
+        if (fg) GetWindowThreadProcessId(fg, &pid);
+        if (pid == GetCurrentProcessId()) { g_trace_left = 240; g_trace_have = false; log_line("F9: X2-SMOOTH-001 trace: next 240 frames"); }
+    }
+    g_f9_prev = f9;
     __try { restore(); }
     __except (EXCEPTION_EXECUTE_HANDLER) { log_line("X2-SMOOTH-001: fault in restore"); }
     g_kind = g_disabled ? INV_STOCK : pacing_kind();
