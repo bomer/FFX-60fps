@@ -40,6 +40,7 @@ static Row* g_rows[] = {
     &row_PERF001,
     &row_PERF002,
     &row_QOLSENSOR,
+    &row_QOLAP,
     &row_FX010,
     &row_DIAG_BTLSIG,
     &row_DIAG_DRAWSTEP,

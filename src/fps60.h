@@ -149,6 +149,7 @@ extern Row row_UI014;                           // rows/UI-014.cpp (minimap arro
 extern Row row_PERF001;                         // rows/PERF-001.cpp (1 ms timer, no power throttling)
 extern Row row_PERF002;                         // rows/PERF-002.cpp (stock 30 fps when 60 is not held)
 extern Row row_QOLSENSOR;                       // rows/QOL-SENSOR.cpp (gameplay: party always has Sensor)
+extern Row row_QOLAP;                           // rows/QOL-AP.cpp (gameplay: whole party earns AP)
 extern Row row_TEXANIM001;                      // rows/TEXANIM-001.cpp (chr texture animation per logic tick)
 extern Row row_DIAG_DYNGEO;                    // rows/DIAG-DYNGEO.cpp (dynamic-geometry upload diag)
 extern Row row_SR003;                          // rows/SR-003.cpp (soft reset chord -> title)
