@@ -6,6 +6,8 @@
 #include "smooth.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
+#include <stdio.h>
 
 typedef void(__cdecl* step_t)(uint8_t* actor, int full);
 typedef void(__cdecl* actor_fn_t)(uint8_t* actor);
@@ -184,8 +186,9 @@ static int sanity_save(int i, const uint8_t* a) {
 // +0x1C/+0x20, bone +0xE4..+0xEC and +0x114..+0x11C); the stream cursors are untouched, so the next logic decode
 // is unchanged (KD-007).
 static const uint32_t SAMPLE_CLOCK = 0x744, NODE_LIST = 0x74C, NODE_SIZE = 0x2C;
-static const int KEYHOLD_D = 0x300;                  // ~0.19 turn between two consecutive keys
+static int KEYHOLD_D = 0x300;                        // SMOOTH-003-KEYHOLD-D: ~0.19 turn between two consecutive keys
 static LONG g_keyholds = 0, g_keyhold_lines = 0;
+static int  g_endextrap_once = 0;                   // SMOOTH-003-ENDEXTRAP-ONCE
 static uint8_t g_hold_bone[MAXB];
 static uint32_t g_keyhold_seen[256];                 // (id << 8 | bone) already logged
 static int g_nkeyhold_seen = 0;
@@ -386,6 +389,7 @@ static bool short_loop(const uint8_t* a) {
 // SMOOTH-003-STOCK-ID / -STOCK-ID-END (decimal, inclusive): actors in this id range take whole stock steps
 // (bisect switch: which actor's half-step causes a glitch).
 static int g_stock_id = 0, g_stock_id_end = 0;
+static int g_hold_id = 0;                        // SMOOTH-003-HOLD-ID (decimal, test): render-only frames keep tick k
 static bool stock_id(const uint8_t* a) {
     if (!g_stock_id) return false;
     uint16_t id = *(const uint16_t*)a;
@@ -398,6 +402,12 @@ static bool stock_actor(const uint8_t* a) {
     uint32_t fl = *(const uint32_t*)(a + FLAGS);
     return g_cloth == 1 && (fl & 0x600000) == 0x600000;
 }
+
+static int  g_despike_id = 0;                        // SMOOTH-003-DESPIKE-ID (decimal)
+static void despike(int i, uint8_t* a);
+static bool despike_match(uint16_t id);
+static int  g_xfade = 0;                             // SMOOTH-003-XFADE (steps, DESPIKE-ID actors; 0/1 = off)
+static LONG g_xfades = 0;
 
 static void __cdecl h_step(uint8_t* a, int full) {
     if (g_disabled || !row_SMOOTH003.on) {
@@ -425,11 +435,43 @@ static void __cdecl h_step(uint8_t* a, int full) {
         *g_half = 0;                                    // whole stock step: no half step, no debt
         g_step(a, full);
         *g_half = 1;
+        if (g_despike_id) { __try { despike(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
         InterlockedIncrement(&g_stock_steps);
         if (full && (g_sanity || g_endextrap)) __try { record_angles(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         return;
     }
+    // SMOOTH-003-XFADE (DESPIKE-ID actors): Bahamut's motions switch without the engine's motion blend (+0x752 = 1),
+    // so a new motion snaps from the last pose to its frame 0 (hurt motion: root about 12 units, U 13/10/2026 "pop").
+    // When this logic step started a new motion (start/end/len changed, sample 0), this frame keeps the last pose
+    // (node outputs +0x20 and bones restored) and the engine's own blend (FUN_008395b0: current += (target -
+    // current) / n per call, all dirty flags set) runs over the next XFADE steps: +0x752 = XFADE and flag 0x10000
+    // ("blend done", which selects the reduced blend path) cleared.
+    int xnb = 0;
+    bool xf = g_xfade > 1 && g_despike_id && i >= 0 && despike_match(*(const uint16_t*)a);
+    int32_t xlen = *(const int32_t*)(a + M_LEN), xend = *(const int32_t*)(a + M_END), xstart = *(const int32_t*)(a + M_START);
+    if (xf) __try { xnb = sanity_save(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) { xnb = 0; }
     g_step(a, full);
+    if (xf && xnb && *(const uint32_t*)(a + SAMPLE_CLOCK) == 0 &&
+        (*(const int32_t*)(a + M_LEN) != xlen || *(const int32_t*)(a + M_END) != xend || *(const int32_t*)(a + M_START) != xstart)) {
+        __try {
+            uint8_t* pose = *(uint8_t**)(a + POSE);
+            uint8_t* bones = *(uint8_t**)(a + BONES);
+            if (pose && bones) {
+                for (int pe = 0; pe < xnb; pe++)
+                    for (int c = 0; c < 9; c++) {
+                        uint32_t po = (uint32_t)pe * POSE_STRIDE + (uint32_t)c * NODE_SIZE;
+                        *(float*)(pose + po + 0x20) = *(const float*)(g_pose_save + po + 0x20);
+                    }
+                memcpy(bones, g_bone_save, (size_t)xnb * BONE_STRIDE);
+                *(int16_t*)(a + BLEND_N) = (int16_t)g_xfade;
+                *(uint32_t*)(a + FLAGS) &= ~0x10000u;
+                if (InterlockedIncrement(&g_xfades) <= 20 || diag_id_match(*(const uint16_t*)a))
+                    log_line("SMOOTH-003-XFADE: slot=%d id=0x%04X new motion (len %d -> %d): last pose kept, engine blend over %d steps",
+                             i, *(const uint16_t*)a, xlen, *(const int32_t*)(a + M_LEN), g_xfade);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    if (g_despike_id) { __try { despike(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (full && (g_sanity || g_endextrap)) __try { record_angles(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (i >= 0 && *g_half != 0) { g_debt[i] = 1; g_debt_id[i] = *(uint16_t*)a; }
 }
@@ -505,6 +547,252 @@ static void diag_actor(int i, const uint8_t* a, int32_t c0, int32_t cs, int32_t 
 }
 
 // The render-only full step of one actor (bit 24 already set). Returns false on a fault (the walk aborts).
+// ---------------------------------------------------------------- rotation slerp (SMOOTH-003-SLERP)
+// The render-only step samples between two keys per rotation channel (KD-004: shortest-path lerp per Euler angle).
+// When the two keys store the rotation in different Euler forms (KD-008 flips, KD-009 gimbal, Bahamut's hit motion
+// 13/10/2026) the per-channel midpoint is a pose neither key has. Instead, per bone: build both key rotations,
+// slerp the quaternions at the sample fraction, and write the result back as Euler angles. The bone's local matrix
+// is M = Rx(+0xE4) . Ry(+0xE8) . Rz(+0xEC), row vectors (Ch_SkeletonJob bone loop 0x832BF6: FUN_006ed780/7c0/800,
+// each M <- M . R; FUN_00706070: row (r0, r1) -> (c r0 - s r1, c r1 + s r0)). The X/Y sign conventions are fitted at
+// install against the game's own helpers; SLERP stays off if no fit matches.
+typedef void(__cdecl* rot_fn_t)(float* dst, float* src, float angle);
+static int  g_slerp = 1;                             // SMOOTH-003-SLERP
+static bool g_slerp_ok = false;
+static float g_sgn[3] = { 1, 1, 1 };
+static LONG g_slerps = 0, g_slerp_bones = 0;
+
+struct M3 { float m[3][3]; };
+static M3 m3_mul(const M3& A, const M3& B) {
+    M3 r;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) r.m[i][j] = A.m[i][0] * B.m[0][j] + A.m[i][1] * B.m[1][j] + A.m[i][2] * B.m[2][j];
+    return r;
+}
+static M3 m3_t(const M3& c) { M3 r; for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) r.m[i][j] = c.m[j][i]; return r; }
+// Row-vector single-axis rotations (transposes of the column-vector forms).
+static M3 rx_row(float t) { float c = cosf(t), s = sinf(t); M3 r = { { { 1, 0, 0 }, { 0, c, s }, { 0, -s, c } } }; return r; }
+static M3 ry_row(float t) { float c = cosf(t), s = sinf(t); M3 r = { { { c, 0, -s }, { 0, 1, 0 }, { s, 0, c } } }; return r; }
+static M3 rz_row(float t) { float c = cosf(t), s = sinf(t); M3 r = { { { c, s, 0 }, { -s, c, 0 }, { 0, 0, 1 } } }; return r; }
+static M3 euler_model(float x, float y, float z, const float* sg) {
+    return m3_mul(m3_mul(rx_row(sg[0] * x), ry_row(sg[1] * y)), rz_row(sg[2] * z));
+}
+// Inverse of euler_model: R^T = Rz(c) Ry(b) Rx(a) in column form (ZYX decomposition), C = R^T.
+static void euler_of(const M3& R, const float* sg, float* out) {
+    M3 C = m3_t(R);
+    float r20 = C.m[2][0];
+    if (r20 > 1) r20 = 1;
+    if (r20 < -1) r20 = -1;
+    float b = asinf(-r20);
+    float a = atan2f(C.m[2][1], C.m[2][2]);
+    float c = atan2f(C.m[1][0], C.m[0][0]);
+    out[0] = a * sg[0]; out[1] = b * sg[1]; out[2] = c * sg[2];
+}
+struct Q { float w, x, y, z; };
+static Q quat_of_col(const M3& C) {
+    float m00 = C.m[0][0], m11 = C.m[1][1], m22 = C.m[2][2];
+    Q q;
+    float tr = m00 + m11 + m22;
+    if (tr > 0) {
+        float s = sqrtf(tr + 1.0f) * 2;
+        q.w = 0.25f * s; q.x = (C.m[2][1] - C.m[1][2]) / s; q.y = (C.m[0][2] - C.m[2][0]) / s; q.z = (C.m[1][0] - C.m[0][1]) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        float s = sqrtf(1.0f + m00 - m11 - m22) * 2;
+        q.w = (C.m[2][1] - C.m[1][2]) / s; q.x = 0.25f * s; q.y = (C.m[0][1] + C.m[1][0]) / s; q.z = (C.m[0][2] + C.m[2][0]) / s;
+    } else if (m11 > m22) {
+        float s = sqrtf(1.0f + m11 - m00 - m22) * 2;
+        q.w = (C.m[0][2] - C.m[2][0]) / s; q.x = (C.m[0][1] + C.m[1][0]) / s; q.y = 0.25f * s; q.z = (C.m[1][2] + C.m[2][1]) / s;
+    } else {
+        float s = sqrtf(1.0f + m22 - m00 - m11) * 2;
+        q.w = (C.m[1][0] - C.m[0][1]) / s; q.x = (C.m[0][2] + C.m[2][0]) / s; q.y = (C.m[1][2] + C.m[2][1]) / s; q.z = 0.25f * s;
+    }
+    return q;
+}
+static M3 col_of_quat(const Q& q) {
+    float w = q.w, x = q.x, y = q.y, z = q.z;
+    M3 c = { { { 1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w) },
+               { 2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w) },
+               { 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y) } } };
+    return c;
+}
+static Q slerp_q(Q a, Q b, float t) {
+    float d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+    if (d < 0) { b.w = -b.w; b.x = -b.x; b.y = -b.y; b.z = -b.z; d = -d; }
+    float ka, kb;
+    if (d > 0.9995f) { ka = 1 - t; kb = t; }
+    else { float th = acosf(d), sn = sinf(th); ka = sinf((1 - t) * th) / sn; kb = sinf(t * th) / sn; }
+    Q r = { ka * a.w + kb * b.w, ka * a.x + kb * b.x, ka * a.y + kb * b.y, ka * a.z + kb * b.z };
+    float n = sqrtf(r.w * r.w + r.x * r.x + r.y * r.y + r.z * r.z);
+    if (n > 0) { r.w /= n; r.x /= n; r.y /= n; r.z /= n; }
+    return r;
+}
+
+// Install-time fit: the game helpers vs euler_model for the 8 sign choices, plus both round trips.
+static bool slerp_selftest(rot_fn_t rx, rot_fn_t ry, rot_fn_t rz) {
+    const float T[6][3] = { { 0.3f, 0.0f, 0.0f }, { 0.0f, 0.4f, 0.0f }, { 0.0f, 0.0f, 0.5f },
+                            { 0.7f, -1.1f, 2.3f }, { -2.9f, 0.6f, -0.4f }, { 1.4f, 1.2f, -2.2f } };
+    for (int combo = 0; combo < 8; combo++) {
+        float sg[3] = { (combo & 1) ? -1.0f : 1.0f, (combo & 2) ? -1.0f : 1.0f, (combo & 4) ? -1.0f : 1.0f };
+        bool good = true;
+        for (int k = 0; k < 6 && good; k++) {
+            __declspec(align(16)) float g[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            rx(g, g, T[k][0]); ry(g, g, T[k][1]); rz(g, g, T[k][2]);
+            M3 m = euler_model(T[k][0], T[k][1], T[k][2], sg);
+            for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) if (fabsf(g[i * 4 + j] - m.m[i][j]) > 1e-4f) good = false;
+            float e[3]; euler_of(m, sg, e);
+            M3 m2 = euler_model(e[0], e[1], e[2], sg);
+            M3 m3 = m3_t(col_of_quat(quat_of_col(m3_t(m))));
+            for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++)
+                if (fabsf(m2.m[i][j] - m.m[i][j]) > 1e-4f || fabsf(m3.m[i][j] - m.m[i][j]) > 1e-4f) good = false;
+        }
+        if (good) { g_sgn[0] = sg[0]; g_sgn[1] = sg[1]; g_sgn[2] = sg[2]; return true; }
+    }
+    return false;
+}
+
+// After the render-only step of actor a (no blend in progress): per bone with an animated rotation channel, slerp
+// between the two keys (prev +0x18 = frame f, value +0x16 = frame f+1, KD-003). Returns true if it judged the actor
+// (KEYHOLD and SANITY then skip it).
+static bool slerp_pose(int i, uint8_t* a) {
+    (void)i;
+    uint32_t frac = *(const uint32_t*)(a + SAMPLE_CLOCK) & 0xFF;
+    if (!frac || *(const int16_t*)(a + BLEND_N) > 1) return false;
+    int nb = bone_count(a);
+    uint8_t* pose = *(uint8_t**)(a + POSE);
+    uint8_t* bones = *(uint8_t**)(a + BONES);
+    if (!nb || !pose || !bones) return false;
+    const uint8_t* map = *(const uint8_t* const*)(a + BONE_MAP);
+    int npe = map ? *(const uint16_t*)(map + 2) : nb;
+    if (npe > MAXB) npe = MAXB;
+    static uint8_t anim[MAXB * 3];
+    memset(anim, 0, (size_t)npe * 3);
+    int guard = 0;
+    for (uint8_t* node = *(uint8_t**)(a + NODE_LIST); node && guard < npe * 9; node = *(uint8_t**)node, guard++) {
+        if (node < pose || node >= pose + (size_t)npe * POSE_STRIDE || node[5] == 0) continue;
+        int pe = (int)((node - pose) / POSE_STRIDE), ch = (int)(((node - pose) % POSE_STRIDE) / NODE_SIZE);
+        if (ch < 3) anim[pe * 3 + ch] = 1;
+    }
+    float t = frac / 256.0f;
+    const float TURN = 6.2831853f / 4096.0f;
+    bool any = false;
+    for (int pe = 0; pe < npe; pe++) {
+        if (!anim[pe * 3] && !anim[pe * 3 + 1] && !anim[pe * 3 + 2]) continue;
+        int b = bone_of(a, pe, nb);
+        if (b < 0) continue;
+        float P[3], N[3];
+        for (int c = 0; c < 3; c++) {
+            const uint8_t* node = pose + (size_t)pe * POSE_STRIDE + (size_t)c * NODE_SIZE;
+            if (anim[pe * 3 + c]) { P[c] = *(const int16_t*)(node + 0x18) * TURN; N[c] = *(const int16_t*)(node + 0x16) * TURN; }
+            else P[c] = N[c] = *(const float*)(node + 0x20) * 6.2831853f;
+        }
+        Q qp = quat_of_col(m3_t(euler_model(P[0], P[1], P[2], g_sgn)));
+        Q qn = quat_of_col(m3_t(euler_model(N[0], N[1], N[2], g_sgn)));
+        Q qs = slerp_q(qp, qn, t);
+        uint8_t* bo = bones + (size_t)b * BONE_STRIDE;
+        // The engine's own sample (per-channel lerp) is in the bone now. Keep it unless it is a different rotation
+        // (> ~3 deg from the slerp): most bones stay untouched.
+        float L[3];
+        for (int c = 0; c < 3; c++) L[c] = *(const float*)(bo + BANG[c]);
+        Q ql = quat_of_col(m3_t(euler_model(L[0], L[1], L[2], g_sgn)));
+        float dq = fabsf(ql.w * qs.w + ql.x * qs.x + ql.y * qs.y + ql.z * qs.z);
+        if (dq > 0.99966f) continue;                 // cos(1.5 deg): half-angle 1.5 deg = 3 deg apart
+        // Write the Euler form closest to the engine's values (both forms, each channel wrapped to the nearest
+        // turn), so per-channel filters that ease +0xE4 toward +0x114 see continuous angles.
+        float e[3], f[3];
+        euler_of(m3_t(col_of_quat(qs)), g_sgn, e);
+        const float PI = 3.14159265f, TWO_PI = 6.2831853f;
+        f[0] = e[0] + PI; f[1] = PI - e[1]; f[2] = e[2] + PI;   // (x+1/2, 1/2-y, z+1/2) turn: same rotation
+        float de = 0, df = 0;
+        for (int c = 0; c < 3; c++) {
+            e[c] += TWO_PI * floorf((L[c] - e[c]) / TWO_PI + 0.5f);
+            f[c] += TWO_PI * floorf((L[c] - f[c]) / TWO_PI + 0.5f);
+            de += fabsf(e[c] - L[c]); df += fabsf(f[c] - L[c]);
+        }
+        const float* w = de <= df ? e : f;
+        for (int c = 0; c < 3; c++) {
+            *(float*)(bo + BANG[c]) = w[c];
+            *(float*)(bo + BANG[c] + 0x30) = w[c];
+        }
+        InterlockedIncrement(&g_slerp_bones);
+        any = true;
+    }
+    if (any && InterlockedIncrement(&g_slerps) == 1)
+        log_line("SMOOTH-003-SLERP: first render-only pose slerped (id 0x%04X, %d pose entries)", *(const uint16_t*)a, npe);
+    // Every bone was judged (kept the engine's lerp or got the slerp): KEYHOLD must not hold a real fast rotation
+    // the lerp got right (Bahamut's hit motion frame 27, pose entry 11: 86 deg on one axis, held -> pop).
+    return true;
+}
+
+// ---------------------------------------------------------------- rotation speed limit (SMOOTH-003-DESPIKE)
+// Per listed actor id (SMOOTH-003-DESPIKE-ID, -ID-END; decimal): every drawn frame, a bone's local rotation turns at
+// most DESPIKE-DEG degrees from the last drawn one (slerp toward the target). Changes the original animation: for
+// motions with one-keyframe flicks (Bahamut's hit motion frame 27, pose entry 11: 86 deg in one 30 Hz frame, stock
+// shows it too; user 13/10/2026 "Bahamut only").
+static int   g_despike_id_end = 0;
+static float g_despike_cos = 0;                      // cos(half of the limit angle)
+static float g_despike_rad = 0;
+static const int DSLOTS = 4;
+static struct { int slot; uint16_t id; int nb; Q q[MAXB]; } g_ds[DSLOTS];
+static LONG g_despiked = 0;
+
+static bool despike_match(uint16_t id) {
+    return g_despike_id && id >= (uint16_t)g_despike_id && id <= (uint16_t)(g_despike_id_end ? g_despike_id_end : g_despike_id);
+}
+
+// Write rotation q to bone bo in the Euler form closest to the angles L the bone holds now.
+static void write_bone_q(uint8_t* bo, const Q& q, const float* L) {
+    const float PI = 3.14159265f, TWO_PI = 6.2831853f;
+    float e[3], f[3];
+    euler_of(m3_t(col_of_quat(q)), g_sgn, e);
+    f[0] = e[0] + PI; f[1] = PI - e[1]; f[2] = e[2] + PI;
+    float de = 0, df = 0;
+    for (int c = 0; c < 3; c++) {
+        e[c] += TWO_PI * floorf((L[c] - e[c]) / TWO_PI + 0.5f);
+        f[c] += TWO_PI * floorf((L[c] - f[c]) / TWO_PI + 0.5f);
+        de += fabsf(e[c] - L[c]); df += fabsf(f[c] - L[c]);
+    }
+    const float* w = de <= df ? e : f;
+    for (int c = 0; c < 3; c++) {
+        *(float*)(bo + BANG[c]) = w[c];
+        *(float*)(bo + BANG[c] + 0x30) = w[c];
+    }
+}
+
+static void despike(int i, uint8_t* a) {
+    if (!g_despike_id || !g_slerp_ok || i < 0 || !despike_match(*(const uint16_t*)a)) return;
+    int nb = bone_count(a);
+    uint8_t* bones = *(uint8_t**)(a + BONES);
+    if (!nb || !bones) return;
+    int s = -1, freeslot = -1;
+    for (int k = 0; k < DSLOTS; k++) {
+        if (g_ds[k].slot == i && g_ds[k].id == *(const uint16_t*)a && g_ds[k].nb == nb) { s = k; break; }
+        if (freeslot < 0 && (g_ds[k].nb == 0 || g_ds[k].slot == i)) freeslot = k;
+    }
+    bool fresh = s < 0;
+    if (fresh) {
+        s = freeslot >= 0 ? freeslot : (i % DSLOTS);
+        g_ds[s].slot = i; g_ds[s].id = *(const uint16_t*)a; g_ds[s].nb = nb;
+    }
+    for (int b = 0; b < nb; b++) {
+        uint8_t* bo = bones + (size_t)b * BONE_STRIDE;
+        float L[3];
+        for (int c = 0; c < 3; c++) L[c] = *(const float*)(bo + BANG[c]);
+        Q q = quat_of_col(m3_t(euler_model(L[0], L[1], L[2], g_sgn)));
+        if (!fresh) {
+            Q p = g_ds[s].q[b];
+            float d = fabsf(p.w * q.w + p.x * q.x + p.y * q.y + p.z * q.z);
+            if (d < g_despike_cos) {
+                float ang = 2.0f * acosf(d > 1 ? 1 : d);
+                q = slerp_q(p, q, g_despike_rad / ang);
+                write_bone_q(bo, q, L);
+                if (InterlockedIncrement(&g_despiked) == 1)
+                    log_line("SMOOTH-003-DESPIKE: first bone turn limited (id 0x%04X bone %d, %.0f deg)",
+                             *(const uint16_t*)a, b, ang * 57.29578f);
+            }
+        }
+        g_ds[s].q[b] = q;
+    }
+}
+
 static bool walk_step(int i, uint8_t* a, uint32_t fl) {
     bool child = *(uint32_t*)(a + PARENT) != 0;
     int32_t c0 = *(int32_t*)(a + M_CLOCK);
@@ -538,13 +826,19 @@ static bool walk_step(int i, uint8_t* a, uint32_t fl) {
     bool ok = safe_step(a, 1);
     // Clamped play-once end: extrapolate only when the logic tick already showed the last frame (the clamped
     // sample then repeats it); an earlier clock gets a real new frame from the clamp.
-    if (ok && kind == 2 && g_endextrap && c0 >= (*(int32_t*)(a + M_END) & ~0xFF))
+    // SMOOTH-003-ENDEXTRAP-ONCE (default 0): the play-once clamp is followed by an unknown next motion, so
+    // extrapolating there guesses wrong (Bahamut's hit motion end, 13/10/2026: bone 18 2.5 units off stock, POSELOG);
+    // it keeps the last frame like stock. The loop-end (LOOPEND) extrapolation stays.
+    if (ok && kind == 2 && g_endextrap && g_endextrap_once && c0 >= (*(int32_t*)(a + M_END) & ~0xFF))
         __try { end_extrapolate(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    if (ok && nb) {
+    bool slerped = false;
+    if (ok && g_slerp && g_slerp_ok) { __try { slerped = slerp_pose(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) { slerped = false; } }
+    if (ok && nb && !slerped) {
         if (g_keyhold) { __try { keyhold(i, a, nb); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
         if (diag_id_match(*(const uint16_t*)a)) { __try { out_diag(i, a, nb); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
         else if (g_sanity) { __try { sanity_check(i, a, nb, c0); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     }
+    if (ok && g_despike_id) { __try { despike(i, a); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (kind) {
         // Unwrapped clock + the half step just added: the next logic Ch_SeqFrame wraps / counts down exactly as stock.
         *(int32_t*)(a + M_CLOCK) = c0 + (*(int32_t*)(a + M_CLOCK) - cs);
@@ -588,6 +882,7 @@ static void walk() {
             if (stock_id(a)) { g_debt[i] = 1; goto next; }                    // bisect switch, stock from the next logic step
             {
                 bool hold_pose = g_blend && (fl & 0x40) == 0 && (*(int16_t*)(a + BLEND_N) > 1 || a[MODE1] != 0);
+                if (g_hold_id && *(uint16_t*)a == (uint16_t)g_hold_id) hold_pose = true;   // bisect: tick-k pose
                 if (hold_pose) {
                     if (!safe_step(a, 0)) return;               // clock only: pose stays at tick k
                     InterlockedIncrement(&g_clock_only);
@@ -859,7 +1154,122 @@ static void pre() {
     memset(g_walked, 0, sizeof(g_walked));
 }
 
+// SMOOTH-003-SPIKE (diagnostic, needs DIAG-ID): after every invocation, the drawn bone rotations of the DIAG-ID
+// actors (up to 2 slots). A bone channel that jumps away for one frame and comes back (t-1 far from t-2 and t, while
+// t-2 and t agree) is logged with the frame kind, motion clock and sample clock of the bad frame.
+static int g_spike = 0;
+struct SpikeFrame { float ang[MAXB * 3]; float pos[MAXB * 3]; int kind; int32_t clock; uint32_t sample; uint32_t fl; };
+static const uint32_t BONE_WORLD_T = 0x88 + 0x30;   // bone world matrix +0x88 (CHR-012), translation row
+static SpikeFrame g_spf[2][4];
+static int g_sp_slot[2] = { -1, -1 }, g_sp_n[2] = { 0, 0 };
+static LONG g_spike_lines = 0;
+
+static void spike_scan() {
+    uint8_t* base = *g_table;
+    int n = *g_count;
+    if (!base || n <= 0) return;
+    if (n > MAXA) n = MAXA;
+    int found = 0;
+    for (int i = 0; i < n && found < 2; i++) {
+        const uint8_t* a = base + i * STRIDE;
+        if (a[2] == 0 || !diag_id_match(*(const uint16_t*)a)) continue;
+        int s = found++;
+        int nb = bone_count(a);
+        const uint8_t* bones = *(const uint8_t* const*)(a + BONES);
+        if (!nb || !bones) { g_sp_n[s] = 0; continue; }
+        if (g_sp_slot[s] != i) { g_sp_slot[s] = i; g_sp_n[s] = 0; }
+        SpikeFrame* f = g_spf[s];
+        f[0] = f[1];
+        f[1] = f[2];
+        f[2] = f[3];
+        for (int b = 0; b < nb; b++)
+            for (int c = 0; c < 3; c++) f[3].ang[b * 3 + c] = *(const float*)(bones + b * BONE_STRIDE + BANG[c]) * INV_2PI;
+        {
+            const float* r = (const float*)(bones + BONE_WORLD_T);
+            for (int b = 0; b < nb; b++) {
+                const float* t = (const float*)(bones + b * BONE_STRIDE + BONE_WORLD_T);
+                for (int c = 0; c < 3; c++) f[3].pos[b * 3 + c] = t[c] - r[c];
+            }
+        }
+        f[3].kind = g_kind;
+        f[3].clock = *(const int32_t*)(a + M_CLOCK);
+        f[3].sample = *(const uint32_t*)(a + SAMPLE_CLOCK);
+        f[3].fl = *(const uint32_t*)(a + FLAGS);
+        if (g_sp_n[s] < 4) { g_sp_n[s]++; if (g_sp_n[s] < 4) continue; }
+        // World-space check: a bone position relative to bone 0 leaves for 1-2 frames (f1, f2) and returns (f3 near
+        // f0). Logged once per excursion, from its larger frame.
+        for (int b = 1; b < nb; b++) {
+            float e1 = 0, e2 = 0, d03 = 0, len = 0;
+            for (int c = 0; c < 3; c++) {
+                float p0 = f[0].pos[b * 3 + c], p1 = f[1].pos[b * 3 + c], p2 = f[2].pos[b * 3 + c], p3 = f[3].pos[b * 3 + c];
+                float m = 0.5f * (p0 + p3);
+                e1 += (p1 - m) * (p1 - m); e2 += (p2 - m) * (p2 - m); d03 += (p3 - p0) * (p3 - p0); len += p0 * p0;
+            }
+            e1 = sqrtf(e1); e2 = sqrtf(e2); d03 = sqrtf(d03); len = sqrtf(len);
+            float th = 0.05f * len, e = e1 > e2 ? e1 : e2;
+            // f1 excursions are reported when they are in f2 position (one frame later), so require f1 or f2 to be
+            // the first frame away: f1 away and (f2 away or back), with f0 and f3 agreeing.
+            if (len <= 0 || e < th || e1 < th || d03 > 0.5f * e) continue;
+            if (InterlockedIncrement(&g_spike_lines) > 400) return;
+            const SpikeFrame& bad = e1 >= e2 ? f[1] : f[2];
+            log_line("SMOOTH-003 SPIKE-WORLD: slot=%d id=0x%04X bone %d off %.1f%% / %.1f%% of its root distance (%.2f) for "
+                     "frames 1/2; worst frame kind %d clock %d sample 0x%X fl %08X (kinds %d %d %d %d clocks %d %d %d %d)",
+                     i, *(const uint16_t*)a, b, 100.0f * e1 / len, 100.0f * e2 / len, len, bad.kind, bad.clock, bad.sample,
+                     bad.fl, f[0].kind, f[1].kind, f[2].kind, f[3].kind, f[0].clock, f[1].clock, f[2].clock, f[3].clock);
+        }
+        for (int b = 0; b < nb; b++)
+            for (int c = 0; c < 3; c++) {
+                float x0 = f[1].ang[b * 3 + c], x1 = f[2].ang[b * 3 + c], x2 = f[3].ang[b * 3 + c];
+                float d01 = turn_diff(x1, x0), d12 = turn_diff(x2, x1), d02 = turn_diff(x2, x0);
+                if (d01 < 0.06f || d12 < 0.06f || d02 > 0.5f * (d01 < d12 ? d01 : d12)) continue;
+                if (InterlockedIncrement(&g_spike_lines) > 400) return;
+                log_line("SMOOTH-003 SPIKE: slot=%d id=0x%04X bone %d ch %d: %.3f -> %.3f -> %.3f turn; bad frame kind %d "
+                         "clock %d sample 0x%X fl %08X (frames before/after: kind %d/%d clock %d/%d)",
+                         i, *(const uint16_t*)a, b, c, x0, x1, x2, f[2].kind, f[2].clock, f[2].sample, f[2].fl,
+                         f[1].kind, f[3].kind, f[1].clock, f[3].clock);
+            }
+    }
+}
+
+// SMOOTH-003-POSELOG (diagnostic, needs DIAG-ID): every invocation, one line per DIAG-ID actor with the motion
+// (len/end), clocks, frame kind, blend count and the drawn positions (relative to bone 0) of a fixed bone list. For
+// stock-vs-60 comparison at equal sample clocks.
+static int g_poselog = 0;
+static const int POSELOG_BONES[] = { 6, 9, 14, 18, 24, 25, 28, 32, 33, 39, 45, 50, 57 };
+static void pose_log() {
+    uint8_t* base = *g_table;
+    int n = *g_count;
+    if (!base || n <= 0) return;
+    if (n > MAXA) n = MAXA;
+    static LONG lines = 0;
+    for (int i = 0; i < n; i++) {
+        const uint8_t* a = base + i * STRIDE;
+        if (a[2] == 0 || !diag_id_match(*(const uint16_t*)a)) continue;
+        int nb = bone_count(a);
+        const uint8_t* bones = *(const uint8_t* const*)(a + BONES);
+        if (!nb || !bones) continue;
+        if (InterlockedIncrement(&lines) > 60000) return;
+        char buf[1024];
+        int k = _snprintf_s(buf, sizeof(buf), _TRUNCATE, "POSE slot=%d id=0x%04X kind %d len %d end %d clock %d sample %d blend %d fl %08X |",
+                            i, *(const uint16_t*)a, g_kind, *(const int32_t*)(a + M_LEN), *(const int32_t*)(a + M_END),
+                            *(const int32_t*)(a + M_CLOCK), *(const int32_t*)(a + SAMPLE_CLOCK),
+                            (int)*(const int16_t*)(a + BLEND_N), *(const uint32_t*)(a + FLAGS));
+        const float* r = (const float*)(bones + BONE_WORLD_T);
+        const float* ar = (const float*)(a + 0x1D0 + 0x30);       // actor root matrix translation (CHR-012)
+        k += _snprintf_s(buf + k, sizeof(buf) - k, _TRUNCATE, " root:%.3f,%.3f,%.3f b0w:%.3f,%.3f,%.3f", ar[0], ar[1], ar[2], r[0], r[1], r[2]);
+        for (int j = 0; j < (int)(sizeof(POSELOG_BONES) / sizeof(POSELOG_BONES[0])) && k > 0; j++) {
+            int b = POSELOG_BONES[j];
+            if (b >= nb) break;
+            const float* t = (const float*)(bones + b * BONE_STRIDE + BONE_WORLD_T);
+            k += _snprintf_s(buf + k, sizeof(buf) - k, _TRUNCATE, " %d:%.3f,%.3f,%.3f", b, t[0] - r[0], t[1] - r[1], t[2] - r[2]);
+        }
+        log_line("%s", buf);
+    }
+}
+
 static void post() {
+    if (g_spike && g_diag_id && !g_disabled) __try { spike_scan(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (g_poselog && g_diag_id && !g_disabled) __try { pose_log(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     static LONG last = 0;
     if (g_diag && g_walks - last >= 600) {
         last = g_walks;
@@ -992,7 +1402,42 @@ static bool install() {
     g_keyhold = config_row("SMOOTH-003-KEYHOLD", 1);
     g_stock_id = config_row("SMOOTH-003-STOCK-ID", 0);
     g_stock_id_end = config_row("SMOOTH-003-STOCK-ID-END", 0);
+    g_hold_id = config_row("SMOOTH-003-HOLD-ID", 0);
     g_endextrap = config_row("SMOOTH-003-ENDEXTRAP", 1);
+    g_endextrap_once = config_row("SMOOTH-003-ENDEXTRAP-ONCE", 0);
+    KEYHOLD_D = config_row("SMOOTH-003-KEYHOLD-D", 0x300);
+    if (KEYHOLD_D < 0x80 || KEYHOLD_D > 0x800) KEYHOLD_D = 0x300;
+    g_spike = config_row("SMOOTH-003-SPIKE", 0);
+    g_poselog = config_row("SMOOTH-003-POSELOG", 0);
+    g_despike_id = config_row("SMOOTH-003-DESPIKE-ID", 0);
+    g_despike_id_end = config_row("SMOOTH-003-DESPIKE-ID-END", 0);
+    g_xfade = config_row("SMOOTH-003-XFADE", 0);
+    if (g_xfade < 0 || g_xfade > 30) g_xfade = 0;
+    {
+        int deg = config_row("SMOOTH-003-DESPIKE-DEG", 20);
+        if (deg < 2 || deg > 170) deg = 20;
+        g_despike_rad = deg * 0.017453293f;
+        g_despike_cos = cosf(0.5f * g_despike_rad);
+        if (g_despike_id) log_line("  SMOOTH-003-DESPIKE: ids %d..%d, bones turn at most %d deg per drawn frame (needs SLERP's fit)",
+                                   g_despike_id, g_despike_id_end ? g_despike_id_end : g_despike_id, deg);
+    }
+    g_slerp = config_row("SMOOTH-003-SLERP", 1);
+    if (g_slerp || g_despike_id) {
+        // Ch_SkeletonJob bone loop: fld [ebx+0xE4] / push / call rotX / fld [ebx+0xE8] ... call rotY ... call rotZ
+        uint8_t* rs = sig_find_unique("SMOOTH-003-SLERP bone rotation calls (Ch_SkeletonJob)",
+            "D9 83 E4 00 00 00 D9 1C 24 50 50 E8 ?? ?? ?? ?? D9 83 E8 00 00 00 83 C4 08 8D 85 FC BF FF FF D9 1C 24 50 50 E8 "
+            "?? ?? ?? ?? D9 83 EC 00 00 00 83 C4 08 8D 85 FC BF FF FF D9 1C 24 50 50 E8", 0x832BF6);
+        rot_fn_t fx = rs ? (rot_fn_t)call_target(rs + 0xB) : nullptr;
+        rot_fn_t fy = rs ? (rot_fn_t)call_target(rs + 0x24) : nullptr;
+        rot_fn_t fz = rs ? (rot_fn_t)call_target(rs + 0x3D) : nullptr;
+        bool fit = false;
+        if (fx && fy && fz) __try { fit = slerp_selftest(fx, fy, fz); } __except (EXCEPTION_EXECUTE_HANDLER) { fit = false; }
+        g_slerp_ok = fit;
+        log_line("  SMOOTH-003-SLERP: %s (rot helpers gva 0x%08X/0x%08X/0x%08X, signs %+.0f %+.0f %+.0f)",
+                 fit ? "self-test passed, render-only poses slerp per bone" : "self-test FAILED - off",
+                 fx ? rt_to_gva_exe((uint8_t*)fx) : 0, fy ? rt_to_gva_exe((uint8_t*)fy) : 0,
+                 fz ? rt_to_gva_exe((uint8_t*)fz) : 0, g_sgn[0], g_sgn[1], g_sgn[2]);
+    }
     if (g_sanity || g_endextrap) {
         g_prev_ang = (float*)calloc((size_t)MAXA * MAXB * 3, sizeof(float));
         g_cur_ang = (float*)calloc((size_t)MAXA * MAXB * 3, sizeof(float));
