@@ -23,6 +23,9 @@ static double    g_min = 1e9, g_max = 0, g_sum = 0;
 static UINT      g_sync_seen = 0xFFFFFFFF, g_flags_seen = 0;
 static bool      g_sync_mixed = false;
 static CRITICAL_SECTION g_cs;
+// X2-PRESENT-VSYNC (test, default 0): the game presents with SyncInterval 0 (D fps60x2.log 21:46: no V-Sync, so frames
+// tear; walking left/right shows a "ghost" double image). 1 = pass SyncInterval 1 (wait for the next refresh).
+static UINT g_force_sync = 0;
 extern Row row_DIAGPRESENT;
 
 static HRESULT STDMETHODCALLTYPE h_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
@@ -42,7 +45,7 @@ static HRESULT STDMETHODCALLTYPE h_present(IDXGISwapChain* sc, UINT sync, UINT f
     else if (g_sync_seen != sync) g_sync_mixed = true;
     g_flags_seen |= flags;
     LeaveCriticalSection(&g_cs);
-    return g_present_orig(sc, sync, flags);
+    return g_present_orig(sc, g_force_sync ? g_force_sync : sync, flags);
 }
 
 // Present's address from a throwaway swap chain (DXGI's vtable slot 8, shared by all swap chains of the process).
@@ -81,10 +84,12 @@ static bool install() {
     InitializeCriticalSection(&g_cs);
     QueryPerformanceFrequency(&g_f);
     QueryPerformanceCounter(&g_win);
+    g_force_sync = (UINT)config_row("X2-PRESENT-VSYNC", 0);
     g_present = find_present();
     if (!g_present) return false;
     if (!hook_entry("X2-DIAG-PRESENT", g_present, (void*)&h_present, (void**)&g_present_orig)) return false;
-    log_line("  X2-DIAG-PRESENT: IDXGISwapChain::Present at %p hooked (observe only)", g_present);
+    log_line("  X2-DIAG-PRESENT: IDXGISwapChain::Present at %p hooked (%s)", g_present,
+             g_force_sync ? "X2-PRESENT-VSYNC: SyncInterval forced" : "observe only");
     return true;
 }
 
