@@ -48,6 +48,7 @@ static bool main_menu_mode(uint32_t m) { m &= 0xFFFF0000u; return m == 0 || m ==
 bool menu002_claims() {
     if (!row_MENU002.on || g_disabled || !g_cfg.pacing || !g_up) return false;
     int32_t req = *g_req;
+    if (*g_up == 0 && *g_up2 == 0 && req == -1) return false;   // no menu up or requested
     return req != -1 ? main_menu_mode((uint32_t)req) : main_menu_mode(*g_mode);
 }
 
@@ -72,10 +73,39 @@ static int __cdecl h_gate() {
     return 0x7FFFFFFF;                                // CMP [0xDF6414],EAX; JL -> step block skipped
 }
 
+// X2-MENU-002-DRAWREPLAY: a task's step can arm a one-shot draw through its draw-phase byte +0x3E, e.g. the party
+// panels' step sets 5 (0x773A2E) and the draw FUN_00773b60 paints the 14 panel shadows only at 5, then sets 7. With
+// the step skipped, render-only passes lost the shadows (U 14/10/2026: "the shadow in the menu blink", 2 consecutive
+// frames). The logic pass records +0x3E of every task after the step; a render-only pass puts it back before the
+// draws, so both passes draw what the stock game draws every frame.
+static uint8_t*  g_task0 = nullptr;              // 0x016BC5F0, stride 0x9C, 16 slots (Menu_TasksStep loop)
+struct TaskSnap { uint32_t step, draw; uint8_t ph; };
+static TaskSnap g_snap[16];
+static bool g_snap_ok = false;
+static LONG g_replays = 0;
+static int  g_drawreplay = 1;
+static const int k_task_stride = 0x9C, k_tasks = 16;
+
 static void __cdecl h_tasks(uint32_t phase) {
-    if (g_pass_render) return;                        // the always-run task step: logic passes only
+    if (g_pass_render) {                              // the always-run task step: logic passes only
+        if (!g_snap_ok || !g_drawreplay) return;
+        for (int i = 0; i < k_tasks; i++) {
+            uint8_t* t = g_task0 + i * k_task_stride;
+            if (*(uint32_t*)(t + 0xC) != g_snap[i].step || *(uint32_t*)(t + 0x10) != g_snap[i].draw) continue;
+            if (t[0x3E] != g_snap[i].ph) { t[0x3E] = g_snap[i].ph; InterlockedIncrement(&g_replays); }
+        }
+        return;
+    }
     g_tasks(phase);
-    if (g_active) g_blend = true;                     // from here on: the draw part of a logic pass
+    if (!g_active) return;
+    g_blend = true;                                   // from here on: the draw part of a logic pass
+    for (int i = 0; i < k_tasks; i++) {
+        uint8_t* t = g_task0 + i * k_task_stride;
+        g_snap[i].step = *(uint32_t*)(t + 0xC);
+        g_snap[i].draw = *(uint32_t*)(t + 0x10);
+        g_snap[i].ph = t[0x3E];
+    }
+    g_snap_ok = true;
 }
 
 static int __cdecl h_tween_step(uint8_t* t) {
@@ -119,6 +149,7 @@ static void pre() {
         log_line("X2-MENU-002: main menu %s (mode 0x%X, request %d)", a ? "at 60 Hz, logic every 2nd pass, slides blended" : "released",
                  *g_mode, *g_req);
         g_nrec = 0;
+        g_snap_ok = false;
     }
     g_active = a;
     g_pass_render = false;
@@ -133,7 +164,8 @@ static void post() {
     static LONG last = 0;
     if (g_passes - last >= 1800) {
         last = g_passes;
-        log_line("X2-MENU-002: passes=%ld render-only=%ld blended reads=%ld rec_full=%ld", g_passes, g_render_passes, g_blended, g_rec_full);
+        log_line("X2-MENU-002: passes=%ld render-only=%ld blended reads=%ld rec_full=%ld draw replays=%ld", g_passes, g_render_passes,
+                 g_blended, g_rec_full, g_replays);
     }
 }
 
@@ -190,6 +222,20 @@ static bool install() {
         log_line("  X2-MENU-002: gate JL does not land on the task step - refused");
         return false;
     }
+    // Menu_TasksStep: MOV ESI,&task[0].step (+0xC); ... ADD ESI,0x9C; CMP ESI,end; JL
+    if (!sig_match(tasks, "55 8B EC 56 57 8B 7D 08 BE ?? ?? ?? ?? 8D 49 00 0F B6 46 33 3B C7") ||
+        !sig_match(tasks + 0x63, "81 C6 9C 00 00 00 81 FE ?? ?? ?? ?? 7C 9F")) {
+        log_line("  X2-MENU-002: Menu_TasksStep not as proven - refused");
+        return false;
+    }
+    uint8_t* first = abs_operand("task table", tasks + 9);
+    uint32_t end = *(const uint32_t*)(tasks + 0x6B);
+    if (!first || end - (uint32_t)(uintptr_t)first != (uint32_t)(k_tasks * k_task_stride)) {
+        log_line("  X2-MENU-002: task table is not 16 x 0x9C - refused");
+        return false;
+    }
+    g_task0 = first - 0xC;
+    g_drawreplay = config_row("X2-MENU-002-DRAWREPLAY", 1);
     g_gate = (gate_t)gate;
     g_tasks = (tasks_t)tasks;
     if (!hook_entry("X2-MENU-002 Tween_Step", ts, (void*)&h_tween_step, (void**)&g_tween_step)) return false;
