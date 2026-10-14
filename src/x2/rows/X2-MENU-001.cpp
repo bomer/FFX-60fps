@@ -51,13 +51,16 @@ static bool install() {
     return true;
 }
 
+bool menu002_claims();                           // rows/X2-MENU-002.cpp: field main menu at 60 Hz
+
 static void pre() {
     bool up = *g_up != 0 || *g_up2 != 0 || *g_req != -1;
-    if (up == g_holding) return;
-    g_holding = up;
+    bool hold = up && !menu002_claims();
+    if (hold == g_holding) return;
+    g_holding = hold;
     log_line("X2-MENU-001: menu %s (in progress %d/%d, request %d, mode 0x%X) - %s", up ? "up" : "closed", *g_up, *g_up2,
-             *g_req, *g_mode, up ? "stock pacing" : "60 Hz pacing");
-    pacing_hold_stock("X2-MENU-001 (PS2 menu)", up);
+             *g_req, *g_mode, hold ? "stock pacing" : (up ? "60 Hz (X2-MENU-002)" : "60 Hz pacing"));
+    pacing_hold_stock("X2-MENU-001 (PS2 menu)", hold);
 }
 
 Row row_MENU001 = {
