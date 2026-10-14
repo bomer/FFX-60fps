@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdio.h>
 
 namespace x2 {
 
@@ -181,6 +182,36 @@ static void apply_render_hold() {
     apply_children(base, n);
 }
 
+// F9 trace (with X2-SMOOTH-001's camera trace): for 240 invocations, the first 3 active non-child actors' drawn root
+// position, tick-k root position and whether this row wrote the root. U 13/10/2026: walking left/right shows a ghost
+// character, gone with X2-SMOOTH-002 off (F6); static RE found the body draw reads the root as expected
+// (re/ledger/SMOOTH2-GHOST.md), so the drawn sequence decides.
+static LONG g_trace_left = 0;
+static bool g_f9_prev = false;
+static bool g_traced_inv = false;
+
+static void trace_roots() {
+    uint8_t* base = *g_table;
+    int n = *g_count;
+    if (!base || n <= 0) return;
+    if (n > MAXA) n = MAXA;
+    char line[700];
+    int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "X2-SMOOTH-002 trace: %c", "LRBS"[g_kind & 3]);
+    int shown = 0;
+    for (int i = 0; i < n && shown < 3; i++) {
+        uint8_t* a = base + i * STRIDE;
+        if (a[2] == 0 || is_child(a)) continue;
+        const float* r = (const float*)(a + ROOT);
+        bool w = g_slot_w[i] >= 0 && g_w_n > 0;
+        const ActHist& h = g_h[i];
+        k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | s%d id%04X %s drawn (%.2f %.2f %.2f) tickk (%.2f %.2f %.2f)",
+                         i, *(uint16_t*)a, w ? "ours" : "game", r[12], r[13], r[14],
+                         h.n ? h.m[1][12] : 0.f, h.n ? h.m[1][13] : 0.f, h.n ? h.m[1][14] : 0.f);
+        shown++;
+    }
+    log_line("%s", line);
+}
+
 static void __cdecl h_draw() {
     bool applied = false;
     if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) &&
@@ -195,6 +226,11 @@ static void __cdecl h_draw() {
         applied = true;
         __try { apply_render_hold(); }
         __except (EXCEPTION_EXECUTE_HANDLER) { log_line("X2-SMOOTH-002: fault 0x%08lX in render hold - row off", GetExceptionCode()); row_SMOOTH002.on = 0; }
+    }
+    if (g_trace_left > 0 && !g_traced_inv) {
+        g_traced_inv = true;
+        __try { trace_roots(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (--g_trace_left == 0) log_line("X2-SMOOTH-002 trace: end");
     }
     g_draw();
 }
@@ -215,6 +251,15 @@ static void restore() {
 
 static void pre() {
     smooth_poll_hotkey();
+    g_traced_inv = false;
+    bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    if (f9 && !g_f9_prev && g_trace_left <= 0) {
+        HWND fg = GetForegroundWindow();
+        DWORD pid = 0;
+        if (fg) GetWindowThreadProcessId(fg, &pid);
+        if (pid == GetCurrentProcessId()) { g_trace_left = 240; log_line("F9: X2-SMOOTH-002 trace: next 240 frames"); }
+    }
+    g_f9_prev = f9;
     __try { restore(); }
     __except (EXCEPTION_EXECUTE_HANDLER) { log_line("X2-SMOOTH-002: fault 0x%08lX in restore", GetExceptionCode()); }
     g_kind = g_disabled ? INV_STOCK : pacing_kind();
