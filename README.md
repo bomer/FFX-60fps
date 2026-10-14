@@ -49,6 +49,8 @@ MSBuild fps60.vcxproj /p:Configuration=Release /p:Platform=Win32
 The outputs are `artifacts/loader/Release/dbghelp.dll` (the shared loader) and `artifacts/Release/fps60_ffx.dll`.
 `x2.vcxproj` builds `fps60_ffx2.dll`, the FFX-2 mod (work in progress).
 
+Sources: `src/loader/` (shared loader), `src/x/` (FFX mod), `src/x2/` (FFX-2 mod). The two mods share no code.
+
 ## License
 
 Apache-2.0 (`LICENSE`). MinHook (`third_party/minhook`) is BSD-2-Clause.

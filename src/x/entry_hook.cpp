@@ -3,7 +3,7 @@
 // freezes the other threads while it writes the JMP, and chains over another mod's hook (Fahrenheit uses
 // MinHook too). Single-CALL retargets stay on patch_call_rel32 (hooks.cpp).
 #include "fps60.h"
-#include "../third_party/minhook/include/MinHook.h"
+#include "../../third_party/minhook/include/MinHook.h"
 
 static volatile LONG g_mh_state = 0;   // 0 = not tried, 1 = ready, 2 = failed
 

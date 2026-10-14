@@ -69,7 +69,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <ModuleDefinitionFile>src\fps60.def</ModuleDefinitionFile>
+      <ModuleDefinitionFile>src\x\fps60.def</ModuleDefinitionFile>
       <AdditionalDependencies>kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -90,83 +90,83 @@
       <OptimizeReferences>true</OptimizeReferences>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <ModuleDefinitionFile>src\fps60.def</ModuleDefinitionFile>
+      <ModuleDefinitionFile>src\x\fps60.def</ModuleDefinitionFile>
       <AdditionalDependencies>kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\proxy.cpp" />
-    <ClCompile Include="src\log.cpp" />
-    <ClCompile Include="src\config.cpp" />
-    <ClCompile Include="src\sigs.cpp" />
-    <ClCompile Include="src\hooks.cpp" />
-    <ClCompile Include="src\pacing.cpp" />
-    <ClCompile Include="src\rollback.cpp" />
-    <ClCompile Include="src\rows.cpp" />
-    <ClCompile Include="src\capture.cpp" />
-    <ClCompile Include="src\capture_config.cpp" />
-    <ClCompile Include="src\rows\MAG-008.cpp" />
-    <ClCompile Include="src\rows\MAG-006.cpp" />
-    <ClCompile Include="src\rows\ppp_pause.cpp" />
-    <ClCompile Include="src\rows\W2A-002.cpp" />
-    <ClCompile Include="src\rows\CLK-002.cpp" />
-    <ClCompile Include="src\rows\MAG-009.cpp" />
-    <ClCompile Include="src\rows\MAG-016.cpp" />
-    <ClCompile Include="src\rows\LOOP-005.cpp" />
-    <ClCompile Include="src\rows\LOOP-004.cpp" />
-    <ClCompile Include="src\rows\MAG-017.cpp" />
-    <ClCompile Include="src\rows\MAG-018.cpp" />
-    <ClCompile Include="src\rows\MAG-019.cpp" />
-    <ClCompile Include="src\rows\MAG-020.cpp" />
-    <ClCompile Include="src\rows\MAG-021.cpp" />
-    <ClCompile Include="src\rows\MAG-022.cpp" />
-    <ClCompile Include="src\rows\MAG-023.cpp" />
-    <ClCompile Include="src\rows\MAG-024.cpp" />
-    <ClCompile Include="src\rows\MAG-025.cpp" />
-    <ClCompile Include="src\rows\MAG-026.cpp" />
-    <ClCompile Include="src\rows\MAG-027.cpp" />
-    <ClCompile Include="src\rows\DIAG-FRAMETIME.cpp" />
-    <ClCompile Include="src\rows\UI-001.cpp" />
-    <ClCompile Include="src\rows\UI-017.cpp" />
-    <ClCompile Include="src\rows\TEXANIM-001.cpp" />
-    <ClCompile Include="src\rows\SR-003.cpp" />
-    <ClCompile Include="src\rows\LAB-001.cpp" />
-    <ClCompile Include="src\rows\DIAG-DYNGEO.cpp" />
-    <ClCompile Include="src\rows\UI-SPH-001.cpp" />
-    <ClCompile Include="src\rows\UI-SPH-002.cpp" />
-    <ClCompile Include="src\rows\UI-014.cpp" />
-    <ClCompile Include="src\rows\PERF-001.cpp" />
-    <ClCompile Include="src\rows\PERF-002.cpp" />
-    <ClCompile Include="src\rows\BOOST-001.cpp" />
-    <ClCompile Include="src\rows\QOL-SENSOR.cpp" />
-    <ClCompile Include="src\rows\QOL-AP.cpp" />
-    <ClCompile Include="src\rows\UI-BTLL1.cpp" />
-    <ClCompile Include="src\rows\DEV-STOCK.cpp" />
-    <ClCompile Include="src\rows\DEV-TURBO.cpp" />
-    <ClCompile Include="src\rows\FX-010.cpp" />
-    <ClCompile Include="src\rows\DIAG-HANGDUMP.cpp" />
-    <ClCompile Include="src\rows\DIAG-BTLSIG.cpp" />
-    <ClCompile Include="src\rows\DIAG-DRAWSTEP.cpp" />
-    <ClCompile Include="src\rows\DIAG-TEXTDUMP.cpp" />
-    <ClCompile Include="src\diag.cpp" />
-    <ClCompile Include="src\rows\smooth_common.cpp" />
-    <ClCompile Include="src\rows\SMOOTH-001.cpp" />
-    <ClCompile Include="src\rows\SMOOTH-002.cpp" />
-    <ClCompile Include="src\rows\SMOOTH-003.cpp" />
-    <ClCompile Include="src\entry_hook.cpp" />
-    <ClCompile Include="src\magic_mods.cpp" />
-    <ClCompile Include="src\reload.cpp" />
+    <ClCompile Include="src\x\proxy.cpp" />
+    <ClCompile Include="src\x\log.cpp" />
+    <ClCompile Include="src\x\config.cpp" />
+    <ClCompile Include="src\x\sigs.cpp" />
+    <ClCompile Include="src\x\hooks.cpp" />
+    <ClCompile Include="src\x\pacing.cpp" />
+    <ClCompile Include="src\x\rollback.cpp" />
+    <ClCompile Include="src\x\rows.cpp" />
+    <ClCompile Include="src\x\capture.cpp" />
+    <ClCompile Include="src\x\capture_config.cpp" />
+    <ClCompile Include="src\x\rows\MAG-008.cpp" />
+    <ClCompile Include="src\x\rows\MAG-006.cpp" />
+    <ClCompile Include="src\x\rows\ppp_pause.cpp" />
+    <ClCompile Include="src\x\rows\W2A-002.cpp" />
+    <ClCompile Include="src\x\rows\CLK-002.cpp" />
+    <ClCompile Include="src\x\rows\MAG-009.cpp" />
+    <ClCompile Include="src\x\rows\MAG-016.cpp" />
+    <ClCompile Include="src\x\rows\LOOP-005.cpp" />
+    <ClCompile Include="src\x\rows\LOOP-004.cpp" />
+    <ClCompile Include="src\x\rows\MAG-017.cpp" />
+    <ClCompile Include="src\x\rows\MAG-018.cpp" />
+    <ClCompile Include="src\x\rows\MAG-019.cpp" />
+    <ClCompile Include="src\x\rows\MAG-020.cpp" />
+    <ClCompile Include="src\x\rows\MAG-021.cpp" />
+    <ClCompile Include="src\x\rows\MAG-022.cpp" />
+    <ClCompile Include="src\x\rows\MAG-023.cpp" />
+    <ClCompile Include="src\x\rows\MAG-024.cpp" />
+    <ClCompile Include="src\x\rows\MAG-025.cpp" />
+    <ClCompile Include="src\x\rows\MAG-026.cpp" />
+    <ClCompile Include="src\x\rows\MAG-027.cpp" />
+    <ClCompile Include="src\x\rows\DIAG-FRAMETIME.cpp" />
+    <ClCompile Include="src\x\rows\UI-001.cpp" />
+    <ClCompile Include="src\x\rows\UI-017.cpp" />
+    <ClCompile Include="src\x\rows\TEXANIM-001.cpp" />
+    <ClCompile Include="src\x\rows\SR-003.cpp" />
+    <ClCompile Include="src\x\rows\LAB-001.cpp" />
+    <ClCompile Include="src\x\rows\DIAG-DYNGEO.cpp" />
+    <ClCompile Include="src\x\rows\UI-SPH-001.cpp" />
+    <ClCompile Include="src\x\rows\UI-SPH-002.cpp" />
+    <ClCompile Include="src\x\rows\UI-014.cpp" />
+    <ClCompile Include="src\x\rows\PERF-001.cpp" />
+    <ClCompile Include="src\x\rows\PERF-002.cpp" />
+    <ClCompile Include="src\x\rows\BOOST-001.cpp" />
+    <ClCompile Include="src\x\rows\QOL-SENSOR.cpp" />
+    <ClCompile Include="src\x\rows\QOL-AP.cpp" />
+    <ClCompile Include="src\x\rows\UI-BTLL1.cpp" />
+    <ClCompile Include="src\x\rows\DEV-STOCK.cpp" />
+    <ClCompile Include="src\x\rows\DEV-TURBO.cpp" />
+    <ClCompile Include="src\x\rows\FX-010.cpp" />
+    <ClCompile Include="src\x\rows\DIAG-HANGDUMP.cpp" />
+    <ClCompile Include="src\x\rows\DIAG-BTLSIG.cpp" />
+    <ClCompile Include="src\x\rows\DIAG-DRAWSTEP.cpp" />
+    <ClCompile Include="src\x\rows\DIAG-TEXTDUMP.cpp" />
+    <ClCompile Include="src\x\diag.cpp" />
+    <ClCompile Include="src\x\rows\smooth_common.cpp" />
+    <ClCompile Include="src\x\rows\SMOOTH-001.cpp" />
+    <ClCompile Include="src\x\rows\SMOOTH-002.cpp" />
+    <ClCompile Include="src\x\rows\SMOOTH-003.cpp" />
+    <ClCompile Include="src\x\entry_hook.cpp" />
+    <ClCompile Include="src\x\magic_mods.cpp" />
+    <ClCompile Include="src\x\reload.cpp" />
     <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\hook.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\trampoline.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
     <ClCompile Include="third_party\minhook\src\hde\hde32.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\fps60.h" />
-    <ClInclude Include="src\capture.h" />
+    <ClInclude Include="src\x\fps60.h" />
+    <ClInclude Include="src\x\capture.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="src\fps60.def" />
+    <None Include="src\x\fps60.def" />
     <None Include="fps60.ini" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
