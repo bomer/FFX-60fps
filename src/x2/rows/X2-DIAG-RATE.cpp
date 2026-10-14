@@ -53,6 +53,10 @@ static TProbe g_tp[2] = {
     { "vtable [10] FUN_0042f490", 0x42F490, "56 8B F1 80 BE AD 03 00 00 00 75 15 E8" },
 };
 static LARGE_INTEGER g_tf;
+// Sg_MainLoop work per invocation (pre() end to post() start: the game's own frame, with our rows), by kind.
+static LARGE_INTEGER g_ml_t0;
+static double g_ml_sum[4], g_ml_max[4];
+static int    g_ml_n[4];
 
 extern "C" void __cdecl x2_tprobe_hit(int i) {
     TProbe& p = g_tp[i];
@@ -117,6 +121,7 @@ static void pre() {
         if (dt > 20.0) g_dt_long++;
     }
     g_tprev = now;
+    QueryPerformanceCounter(&g_ml_t0);
     if (g_hooked) return;
     g_hooked = true;
     for (int i = 0; i < 4; i++) {
@@ -135,6 +140,12 @@ static void pre() {
 static void post() {
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
+    if (g_ml_t0.QuadPart) {
+        int kd = pacing_kind() & 3;
+        double ms = (double)(t.QuadPart - g_ml_t0.QuadPart) * 1000.0 / (double)g_f.QuadPart;
+        g_ml_sum[kd] += ms; g_ml_n[kd]++;
+        if (ms > g_ml_max[kd]) g_ml_max[kd] = ms;
+    }
     double s = (double)(t.QuadPart - g_t0.QuadPart) / (double)g_f.QuadPart;
     if (s < 5.0) return;
     g_t0 = t;
@@ -158,6 +169,9 @@ static void post() {
         k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | frame ms min %.1f avg %.2f max %.1f, >20ms %d",
                          g_dt_min, g_dt_sum / g_dt_n, g_dt_max, g_dt_long);
     g_dt_min = 1e9; g_dt_max = 0; g_dt_sum = 0; g_dt_n = 0; g_dt_long = 0;
+    k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | mainloop ms logic avg %.2f max %.1f, render-only avg %.2f max %.1f",
+                     g_ml_n[0] ? g_ml_sum[0] / g_ml_n[0] : 0.0, g_ml_max[0], g_ml_n[1] ? g_ml_sum[1] / g_ml_n[1] : 0.0, g_ml_max[1]);
+    for (int i = 0; i < 4; i++) { g_ml_sum[i] = 0; g_ml_max[i] = 0; g_ml_n[i] = 0; }
     for (auto& p : g_tp) {
         if (!p.gva || !p.n) continue;
         k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | %s %.1f/s ms min %.1f avg %.2f max %.1f >20ms %d",
