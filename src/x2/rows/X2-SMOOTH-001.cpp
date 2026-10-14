@@ -81,6 +81,24 @@ static bool view_turn_cos(const float* a, const float* b, float* c) {
 static LONG  g_rh_checked = 0, g_rh_held = 0;
 static float g_rh_sum = 0, g_rh_max = 0;
 
+// X2-SMOOTH-001-LASTWRITE (default 1): the HD camera setter HdCam_Set 0x482320 keeps only the FIRST write per slot and
+// HD frame (mask [hd+0x218], reset to 0xFF at 0x47EE9A at the end of app render). On logic invocations MapCam_Update
+// (0x7DB05D, before the viewport loop) commits the raw new tick first, so this row's interpolated commit was dropped and
+// the screen showed k+1, k+1, k+2 (D 14/10/2026: user recording, background identical every 2nd frame, 7 px steps).
+// Our commits re-arm slot 0's bit so the last write (ours) wins. Evidence: re/ledger/HDNODE.md (S).
+static int   g_lastwrite = 1;
+static uint8_t** g_hdobj = nullptr;             // 0x00DCDA04 (HD renderer object)
+static LONG  g_lw_rearm = 0, g_lw_commits = 0;
+
+static void commit_slot0() {
+    if (g_lastwrite && g_hdobj && *g_hdobj) {
+        uint32_t* mask = (uint32_t*)(*g_hdobj + 0x218);
+        if (!(*mask & 1)) { *mask |= 1; InterlockedIncrement(&g_lw_rearm); }
+    }
+    InterlockedIncrement(&g_lw_commits);
+    g_commit(g_view, 0);
+}
+
 static int src_tag() { return *g_src3 ? 3 : (*g_src2 ? 2 : 1); }
 
 static void write_view(const float* out, int tag) {
@@ -88,7 +106,7 @@ static void write_view(const float* out, int tag) {
     memcpy(g_out, out, 64);
     memcpy(g_view, out, 64);
     g_written = true;
-    if (tag == 3 || tag == 1) { g_commit(g_view, 0); g_committed = true; }
+    if (tag == 3 || tag == 1) { commit_slot0(); g_committed = true; }
 }
 
 static void render_hold(int vp) {
@@ -195,7 +213,7 @@ static void restore() {
     if (!g_written) return;
     if (memcmp(g_view, g_out, 64) == 0) {
         memcpy(g_view, g_orig, 64);
-        if (g_committed) g_commit(g_view, 0);
+        if (g_committed) commit_slot0();
     }
     g_written = false;
     g_committed = false;
@@ -238,9 +256,9 @@ static void post() {
     if (g_logic_calls - last >= 1800) {
         last = g_logic_calls;
         log_line("X2-SMOOTH-001: logic calls=%ld interp=%ld cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld rot_cuts=%ld | renderhold "
-                 "checked=%ld held=%ld eye avg %.2f max %.2f | src=%d live=%d",
+                 "checked=%ld held=%ld eye avg %.2f max %.2f | lastwrite commits=%ld rearmed=%ld | src=%d live=%d",
                  g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, g_rot_cuts, g_rh_checked, g_rh_held,
-                 g_rh_held ? g_rh_sum / g_rh_held : 0.0f, g_rh_max, src_tag(), smooth_live(1));
+                 g_rh_held ? g_rh_sum / g_rh_held : 0.0f, g_rh_max, g_lw_commits, g_lw_rearm, src_tag(), smooth_live(1));
     }
     static LONG reported = 0;
     if (!reported && g_st.interp > 0) {
@@ -296,6 +314,23 @@ static bool install() {
     if (!bb) return false;
     g_blk = (float*)abs_operand("camera blocks", bb + 0x0E);
     if (!g_blk) return false;
+    // LASTWRITE: inside Cam_CommitView, MOV ECX,[hdobj]; slot switch; slot-2 CALL HdCam_Set (thiscall, RET 8, mask +0x218)
+    g_lastwrite = config_row("X2-SMOOTH-001-LASTWRITE", 1);
+    if (g_lastwrite) {
+        uint8_t* lw = sig_find("X2-SMOOTH-001-LASTWRITE commit tail",
+            "8B 45 0C 8B 0D ?? ?? ?? ?? 83 E8 00 74 2A 48 74 15 48 8D 85 40 FF FF FF 75 24 6A 02 50 E8", 0x449B58);
+        uint8_t* set = lw ? call_target(lw + 0x1D) : nullptr;
+        if (!lw || lw < commit || lw > commit + 0x300 || !set ||
+            !sig_match(set, "55 8B EC 57 8B F9 8B 4D 0C 8B 97 18 02 00 00 B8 01 00 00 00 D3 E0 85 D0 74") ||
+            !(g_hdobj = (uint8_t**)abs_operand("hd renderer", lw + 5))) {
+            log_line("  X2-SMOOTH-001: HdCam_Set not confirmed - X2-SMOOTH-001-LASTWRITE off");
+            g_lastwrite = 0;
+            g_hdobj = nullptr;
+        } else {
+            log_line("  X2-SMOOTH-001-LASTWRITE: HdCam_Set gva=0x%08X (expected 0x00482320), hd object ptr gva=0x%08X (0x00DCDA04)",
+                     rt_to_gva(set), rt_to_gva(g_hdobj));
+        }
+    }
     g_finalize = (finalize_t)fin;
     g_commit = (commit_t)commit;
     g_fov = config_row("X2-SMOOTH-001-FOV", 1);
