@@ -44,9 +44,67 @@ extern Row row_MENU002;
 
 static bool main_menu_mode(uint32_t m) { m &= 0xFFFF0000u; return m == 0 || m == 0x04000000u; }
 
+// Parts, each with an ini key and a numpad hotkey (game window focused, logged). U 14/10/2026: "hotkey to turn on/off
+// each of them mid game so i can choose what to keep".
+//   Num 0  X2-MENU-002           the whole row (off = X2-MENU-001 stock pacing, 30 fps menu)
+//   Num 1  X2-MENU-002-TWEEN     tween slides drawn half-way (Tween_GetValue / Tween_GetPhase)
+//   Num 2  X2-MENU-002-DRAWREPLAY task draw-phase replay (panel shadows)
+//   Num 3  X2-MENU-002-POINT     screen point [0x16BC550]/[0x16BC554] (eased by tweens 0x16BDA80/90 in FUN_00761f30,
+//                                read directly by Menu_DrawModules 0x764E07 and FUN_00762a20)
+//   Num 4  X2-MENU-002-BACKDROP  backdrop ramp [0x16BDC24..0x16BDC2E] (FUN_00761f80: position s16 x2, colour/alpha
+//                                u8 x5, stepped +0x124/step; read directly by FUN_007622f0 / FUN_00760d60)
+// POINT and BACKDROP: values read straight from memory. The logic pass writes the midpoint between the value before
+// the step (at the gate) and after it (task step) for the draws, and puts the stepped value back after the pass
+// (only if it still holds our midpoint).
+static int g_user_on = 1, g_t_tween = 1, g_t_point = 1, g_t_backdrop = 1;
+static int g_drawreplay = 1;
+
+struct BlendVar { volatile uint8_t* p; int size; bool sgn; int* toggle; int32_t pre, post, mid; bool wrote; };
+static BlendVar g_vars[9];
+static int g_nvars = 0;
+
+static int32_t var_get(const BlendVar& v) {
+    if (v.size == 4) return *(volatile int32_t*)v.p;
+    if (v.size == 2) return v.sgn ? *(volatile int16_t*)v.p : *(volatile uint16_t*)v.p;
+    return v.sgn ? *(volatile int8_t*)v.p : *(volatile uint8_t*)v.p;
+}
+static void var_set(const BlendVar& v, int32_t x) {
+    if (v.size == 4) *(volatile int32_t*)v.p = x;
+    else if (v.size == 2) *(volatile int16_t*)v.p = (int16_t)x;
+    else *(volatile uint8_t*)v.p = (uint8_t)x;
+}
+static void add_var(uint8_t* p, int size, bool sgn, int* toggle) {
+    BlendVar& v = g_vars[g_nvars++];
+    v.p = p; v.size = size; v.sgn = sgn; v.toggle = toggle; v.wrote = false;
+}
+
+struct Hotkey { int vk; int* flag; const char* name; bool prev; };
+static Hotkey g_keys[] = {
+    { VK_NUMPAD0, &g_user_on,    "X2-MENU-002 (60 fps main menu)", false },
+    { VK_NUMPAD1, &g_t_tween,    "X2-MENU-002-TWEEN (slides)", false },
+    { VK_NUMPAD2, &g_drawreplay, "X2-MENU-002-DRAWREPLAY (shadows)", false },
+    { VK_NUMPAD3, &g_t_point,    "X2-MENU-002-POINT (screen point)", false },
+    { VK_NUMPAD4, &g_t_backdrop, "X2-MENU-002-BACKDROP (backdrop ramp)", false },
+};
+
+static void poll_hotkeys() {
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    bool focus = pid == GetCurrentProcessId();
+    for (Hotkey& k : g_keys) {
+        bool down = (GetAsyncKeyState(k.vk) & 0x8000) != 0;
+        if (down && !k.prev && focus) {
+            *k.flag = !*k.flag;
+            log_line("Num %d: %s %s", k.vk - VK_NUMPAD0, k.name, *k.flag ? "ON" : "OFF");
+        }
+        k.prev = down;
+    }
+}
+
 // Called by X2-MENU-001 every invocation: true = this row runs the menu at 60 Hz (no stock hold).
 bool menu002_claims() {
-    if (!row_MENU002.on || g_disabled || !g_cfg.pacing || !g_up) return false;
+    if (!row_MENU002.on || !g_user_on || g_disabled || !g_cfg.pacing || !g_up) return false;
     int32_t req = *g_req;
     if (*g_up == 0 && *g_up2 == 0 && req == -1) return false;   // no menu up or requested
     return req != -1 ? main_menu_mode((uint32_t)req) : main_menu_mode(*g_mode);
@@ -64,7 +122,10 @@ static int __cdecl h_gate() {
     g_nrec = 0;
     InterlockedIncrement(&g_passes);
     // the pacing core's alternation: X2-UI-017 latches the pad on the same logic invocations, so no press is lost
-    if (!render_only()) return n;
+    if (!render_only()) {
+        for (int i = 0; i < g_nvars; i++) { g_vars[i].pre = var_get(g_vars[i]); g_vars[i].wrote = false; }
+        return n;
+    }
     g_pass_render = true;
     InterlockedIncrement(&g_render_passes);
     (*g_counter)--;                                   // undo this pass's INC (0x76473A ran before the gate)
@@ -82,8 +143,7 @@ static uint8_t*  g_task0 = nullptr;              // 0x016BC5F0, stride 0x9C, 16 
 struct TaskSnap { uint32_t step, draw; uint8_t ph; };
 static TaskSnap g_snap[16];
 static bool g_snap_ok = false;
-static LONG g_replays = 0;
-static int  g_drawreplay = 1;
+static LONG g_replays = 0, g_var_mids = 0;
 static const int k_task_stride = 0x9C, k_tasks = 16;
 
 static void __cdecl h_tasks(uint32_t phase) {
@@ -106,6 +166,17 @@ static void __cdecl h_tasks(uint32_t phase) {
         g_snap[i].ph = t[0x3E];
     }
     g_snap_ok = true;
+    for (int i = 0; i < g_nvars; i++) {                // POINT / BACKDROP: the draws see the midpoint
+        BlendVar& v = g_vars[i];
+        if (!*v.toggle) continue;
+        v.post = var_get(v);
+        if (v.post == v.pre) continue;
+        v.mid = (v.pre + v.post) / 2;
+        var_set(v, v.mid);
+        v.mid = var_get(v);                           // as stored (narrow types)
+        v.wrote = true;
+        InterlockedIncrement(&g_var_mids);
+    }
 }
 
 static int __cdecl h_tween_step(uint8_t* t) {
@@ -128,7 +199,7 @@ static int __cdecl h_tween_step(uint8_t* t) {
 
 static int __cdecl h_get_value(uint8_t* t) {
     int v = *(int16_t*)(t + 0xE);
-    if (!g_blend) return v;
+    if (!g_blend || !g_t_tween) return v;
     TweenRec* e = find(t);
     if (!e || e->v1 != v || e->v0 == e->v1) return v;
     InterlockedIncrement(&g_blended);
@@ -137,13 +208,14 @@ static int __cdecl h_get_value(uint8_t* t) {
 
 static int __cdecl h_get_phase(uint8_t* t) {
     int v = *(int16_t*)(t + 0xA);
-    if (!g_blend) return v;
+    if (!g_blend || !g_t_tween) return v;
     TweenRec* e = find(t);
     if (!e || e->ph1 != v || e->ph0 == e->ph1) return v;
     return ((int)e->ph0 + (int)e->ph1) / 2;
 }
 
 static void pre() {
+    poll_hotkeys();
     bool a = menu002_claims();
     if (a != g_active) {
         log_line("X2-MENU-002: main menu %s (mode 0x%X, request %d)", a ? "at 60 Hz, logic every 2nd pass, slides blended" : "released",
@@ -159,13 +231,18 @@ static void pre() {
 
 static void post() {
     if (g_pass_render && g_fade_saved_ok) *g_fade = g_fade_saved;   // the ramp ran once more this pass: undo it
+    for (int i = 0; i < g_nvars; i++) {                // put the stepped values back
+        BlendVar& v = g_vars[i];
+        if (v.wrote && var_get(v) == v.mid) var_set(v, v.post);
+        v.wrote = false;
+    }
     g_pass_render = false;
     g_blend = false;
     static LONG last = 0;
     if (g_passes - last >= 1800) {
         last = g_passes;
-        log_line("X2-MENU-002: passes=%ld render-only=%ld blended reads=%ld rec_full=%ld draw replays=%ld", g_passes, g_render_passes,
-                 g_blended, g_rec_full, g_replays);
+        log_line("X2-MENU-002: passes=%ld render-only=%ld blended reads=%ld rec_full=%ld draw replays=%ld point/backdrop mids=%ld",
+                 g_passes, g_render_passes, g_blended, g_rec_full, g_replays, g_var_mids);
     }
 }
 
@@ -236,6 +313,35 @@ static bool install() {
     }
     g_task0 = first - 0xC;
     g_drawreplay = config_row("X2-MENU-002-DRAWREPLAY", 1);
+    g_t_tween = config_row("X2-MENU-002-TWEEN", 1);
+    g_t_point = config_row("X2-MENU-002-POINT", 1);
+    g_t_backdrop = config_row("X2-MENU-002-BACKDROP", 1);
+    // POINT: FUN_00761f30 MOV EAX,[target x]; CMP EAX,[x]; JNE; MOV EAX,[target y]; CMP EAX,[y]; JE; PUSH tween
+    uint8_t* pt = sig_find("X2-MENU-002-POINT step",
+        "A1 ?? ?? ?? ?? 3B 05 ?? ?? ?? ?? 75 0D A1 ?? ?? ?? ?? 3B 05 ?? ?? ?? ?? 74 35 68", 0x761F30);
+    uint8_t* px = pt ? abs_operand("point x", pt + 7) : nullptr;
+    uint8_t* py = pt ? abs_operand("point y", pt + 0x14) : nullptr;
+    if (px && py && *(const uint32_t*)(pt + 0x3E) == (uint32_t)(uintptr_t)px && *(const uint32_t*)(pt + 0x4B) == (uint32_t)(uintptr_t)py) {
+        add_var(px, 4, true, &g_t_point);
+        add_var(py, 4, true, &g_t_point);
+    } else {
+        log_line("  X2-MENU-002-POINT: not confirmed - off");
+        g_t_point = 0;
+    }
+    // BACKDROP: FUN_00761f80 CMP word [active],0; JE; PUSH EDI; MOV DI,[ramp]; CMP DI,-1 ... CMP word [x],AX at +0x4D
+    uint8_t* bd = sig_find("X2-MENU-002-BACKDROP step",
+        "66 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 57 66 8B 3D ?? ?? ?? ?? 66 83 FF FF", 0x761F80);
+    uint8_t* ramp = bd ? abs_operand("backdrop ramp", bd + 0x12) : nullptr;
+    uint8_t* bx = bd && sig_match(bd + 0x4D, "66 39 05") ? abs_operand("backdrop x", bd + 0x50) : nullptr;
+    if (ramp && bx && bx == ramp + 0x12) {            // record layout (S): ramp +0x12 = 0x16BDC12, x = 0x16BDC24
+        add_var(bx, 2, true, &g_t_backdrop);          // 0x16BDC24 x
+        add_var(bx + 2, 2, true, &g_t_backdrop);      // 0x16BDC26 y
+        static const int k_u8[] = { 4, 5, 6, 7, 0xA };   // 0x16BDC28..2B, 0x16BDC2E
+        for (int o : k_u8) add_var(bx + o, 1, false, &g_t_backdrop);
+    } else {
+        log_line("  X2-MENU-002-BACKDROP: not confirmed - off");
+        g_t_backdrop = 0;
+    }
     g_gate = (gate_t)gate;
     g_tasks = (tasks_t)tasks;
     if (!hook_entry("X2-MENU-002 Tween_Step", ts, (void*)&h_tween_step, (void**)&g_tween_step)) return false;
