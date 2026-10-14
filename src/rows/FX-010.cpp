@@ -330,12 +330,31 @@ static int       g_deferred_n = 0;
 static uint32_t  g_inv_stamp = 0;                   // invocation counter (post)
 static volatile LONG g_deferred_total = 0, g_deferred_applied = 0, g_deferred_dropped = 0;
 
+// DIAG-FX010-RESTART: the step running now, to log restarts that were not deferred under 60 Hz pacing
+static void*    g_rs_prog = nullptr;
+static int      g_rs_mode = 0;                   // 0 logic, 1 paused render-only, 2 fresh render-only (unpaused)
+static bool     g_diag_restart = false;
+static int      g_loopdefer_stale = 0;
+static volatile LONG g_raw_restarts = 0;
+
 static void __cdecl h_restart(void* part) {
+    if (g_defer_prog && g_deferred_n >= 256) {           // full: evict entries of programs not stepped for 10 s
+        int w = 0;
+        for (int i = 0; i < g_deferred_n; i++)
+            if (g_inv_stamp - g_deferred[i].stamp <= 600) g_deferred[w++] = g_deferred[i];
+            else InterlockedIncrement(&g_deferred_dropped);
+        g_deferred_n = w;
+    }
     if (g_defer_prog && g_deferred_n < 256) {
         g_deferred[g_deferred_n++] = {g_defer_prog, part, g_inv_stamp};
         InterlockedIncrement(&g_deferred_total);
         return;
     }
+    if (g_diag_restart && pacing_active() && InterlockedIncrement(&g_raw_restarts) <= 200)
+        log_line("DIAG-FX010-RESTART: raw restart prog %d part %p during %s step (%s, queue %d)",
+                 g_rs_prog ? prog_index(g_rs_prog) : -1, part,
+                 g_rs_mode == 0 ? "logic" : g_rs_mode == 1 ? "paused render-only" : "fresh render-only",
+                 g_defer_prog ? "queue full" : "not deferred", g_deferred_n);
     g_restart(part);
 }
 
@@ -358,13 +377,21 @@ static void deferred_flush(void* prog, bool drop) {
     int w = 0;
     for (int i = 0; i < g_deferred_n; i++) {
         Deferred d = g_deferred[i];
-        bool stale = g_inv_stamp - d.stamp > 8;
+        // A program that is not stepped for a while (off-screen water, Baaj ruins) must still get its restart at its
+        // next logic step: dropped restarts were drawn un-restarted when the effect came into view (yellow flash,
+        // U 14/10/2026; D DIAG-FX010-RESTART "stale" drops of programs 67..74). FX-010-LOOPDEFER-STALE = invocations
+        // before a queued restart is dropped; 0 (default) = never (program end and part_in_prog still drop).
+        bool stale = g_loopdefer_stale > 0 && g_inv_stamp - d.stamp > (uint32_t)g_loopdefer_stale;
         if (d.prog != prog && !stale) { g_deferred[w++] = d; continue; }
         if (!drop && !stale && part_in_prog((uint8_t*)prog, d.part)) {
             g_restart(d.part);
             InterlockedIncrement(&g_deferred_applied);
         } else {
             InterlockedIncrement(&g_deferred_dropped);
+            if (g_diag_restart && InterlockedIncrement(&g_raw_restarts) <= 200)
+                log_line("DIAG-FX010-RESTART: deferred restart dropped: prog %d part %p, queued %d invocations ago (%s; flushing prog %d)",
+                         prog_index(d.prog), d.part, (int)(g_inv_stamp - d.stamp),
+                         drop ? "program ended" : stale ? "stale" : "particle no longer in the program", prog_index(prog));
         }
     }
     g_deferred_n = w;
@@ -677,8 +704,12 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
     if (row_FX010.on && !g_disabled && pacing_kind() == INV_BUILD && prog_selected(prog)) {
         if (*(int32_t*)((uint8_t*)prog + 8) == 0 && *(int32_t*)((uint8_t*)prog + 0xC) == 0) {
             InterlockedIncrement(&g_fresh_calls);
-            return g_tramp(prog, flags);
+            g_rs_prog = prog; g_rs_mode = 2;
+            int rf = g_tramp(prog, flags);
+            g_rs_prog = nullptr;
+            return rf;
         }
+        g_rs_prog = prog; g_rs_mode = 1;
         InterlockedIncrement(&g_paused_calls);
         if (g_diag_submit) diag_step_begin(2);
         if (g_diag_writes) { wr_snapshot((uint8_t*)prog); g_ph_active = 1; }
@@ -690,6 +721,7 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         if (g_diag_writes) wr_diff(2);
         if (g_rollback) rb_restore();
         if (g_diag_submit) diag_step_end(prog, 2);
+        g_rs_prog = nullptr;
         return r;
     }
     if (g_diag_writes && row_FX010.on) {
@@ -709,12 +741,14 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         if (pi < g_prog_lo || pi > g_prog_hi) defer = false;
     }
     g_defer_prog = defer ? prog : nullptr;
+    g_rs_prog = prog; g_rs_mode = 0;
     bool interp = g_interp && g_psnap && row_FX010.on && !g_disabled && pacing_active() && pacing_kind() != INV_BUILD &&
                   g_skip_render && *g_skip_render == 0 && prog_selected(prog);
     if (interp) *g_skip_render = 1;                          // advance without drawing (engine backlog mode)
     int r = g_tramp(prog, flags);
     if (interp) *g_skip_render = 0;
     g_defer_prog = nullptr;
+    g_rs_prog = nullptr;
     if (r && g_deferred_n) deferred_flush(prog, true);       // program ended: the field loop frees it now
     if (!r && g_psnap && row_FX010.on && pacing_kind() != INV_BUILD) ex_snapshot((uint8_t*)prog);
     if (interp && !r) {                                      // draw once, paused, half a tick behind
@@ -914,6 +948,8 @@ static bool install() {
     g_drawcam = config_row("FX-010-DRAWOPS", 1) != 0;
     g_keyadd = config_row("FX-010-KEYADD", 1) != 0;
     g_diag_ops = config_row("DIAG-FX010-OPS", 0) != 0;
+    g_diag_restart = config_row("DIAG-FX010-RESTART", 0) != 0;
+    g_loopdefer_stale = config_row("FX-010-LOOPDEFER-STALE", 0);
     g_diag_writes = config_row("DIAG-FX010-WRITES", 0) != 0;
     g_rollback = config_row("FX-010-ROLLBACK", 0) != 0;
     g_extrap = config_row("FX-010-EXTRAP", 0);
