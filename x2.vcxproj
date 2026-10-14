@@ -120,6 +120,7 @@
     <ClCompile Include="src\x2\rows\X2-SMOOTH-002.cpp" />
     <ClCompile Include="src\x2\rows\X2-SMOOTH-003.cpp" />
     <ClCompile Include="src\x2\rows\X2-DIAG-DRAWSTEP.cpp" />
+    <ClCompile Include="src\x2\rows\X2-DIAG-PRESENT.cpp" />
     <ClCompile Include="src\x2\rows\X2-DEV-BISECT.cpp" />
     <ClCompile Include="src\x2\x2_magic_mods.cpp" />
     <ClCompile Include="third_party\minhook\src\buffer.c"><WarningLevel>Level3</WarningLevel><SDLCheck>false</SDLCheck></ClCompile>
