@@ -96,9 +96,16 @@ static int      g_hold_n = 0;
 static LONG g_loopend_holds = 0, g_stock_steps = 0, g_guard_wrap = 0, g_guard_clamp = 0, g_guard_hold = 0;
 static LONG g_walks = 0, g_stepped = 0, g_pays = 0, g_batches = 0, g_gated_seq = 0, g_gated_motev = 0;
 
-// CLOTHHOLD (mode 2 only): the cloth job Ch_ClothJob 0x6DB500 (cdecl(actor**, int* count), worker threads) is skipped
-// for walked actors on render-only invocations, so hair and cloth step once per logic tick.
-static int      g_clothhold = 2;
+// CLOTHHOLD: the cloth job Ch_ClothJob 0x6DB500 (cdecl(actor**, int* count), worker threads) runs for walked actors on
+// render-only invocations too, so hair and cloth would swing 2x. Mode 2: skipped on render-only invocations (cloth 30 Hz,
+// one tick behind the 60 Hz body: U 13/10/2026 "ghost character when walking left/right", "maybe cloth is not
+// smooth"). Mode 4 (default, port of FFX's default): after each logic job the mesh is redeformed at the midpoint of
+// the last two job results, and a render-only invocation deforms the latest one, so cloth trails the body by half a
+// tick at 60 Hz, like everything else. Mode 3: extrapolation (FFX: overshoots). FFX-2 offsets (PORT-SMOOTH3.md, S):
+// mesh entries +0x1C8 (stride 0x38, desc +0 (vertex count u16 at +4), vertex array +0x08, +0x0C/+0x2C/+0x34 as FFX),
+// model header +0x1CC (entry count u16 at +6), reset counter +0x824, reset flag bit 0x800000 at +0x1A0, deform gate
+// CMP [0xDF6440],0 at job +0x27 and deform Ch_ClothDeform 0x6DAE00 at job +0x31.
+static int      g_clothhold = 4;
 static uint8_t* g_cjob_fn = nullptr;
 static cjob_t   g_cjob_tramp = nullptr;
 static volatile LONG g_cloth_held = 0;
@@ -413,9 +420,94 @@ static void __cdecl h_noskel() {
     g_noskel();
 }
 
-// ---------------------------------------------------------------- CLOTHHOLD mode 2 (worker threads)
+// ---------------------------------------------------------------- CLOTHHOLD modes 2/3/4 (worker threads)
+static const uint32_t C_ENTS = 0x1C8, C_MDL = 0x1CC, C_RESET = 0x824, C_ENT_STRIDE = 0x38;
+static void (__cdecl* g_deform)(uint8_t*) = nullptr;
+static volatile int32_t* g_deform_gate = nullptr;
+static int g_extrap_pct = 50;                    // X2-SMOOTH-003-CLOTHEXTRAP-PCT (mode 3)
+static volatile LONG g_step_n = 1;               // logic invocations (game thread writes, jobs read)
+static volatile LONG g_extrap_n = 0, g_extrap_miss = 0;
+
+struct ClothSnap { float* vtex; uint8_t* actor; uint32_t n; LONG ncur, nprev; float* cur; float* prev; };
+enum { NSNAP = 128 };
+static ClothSnap g_snap[NSNAP];
+static SRWLOCK g_snap_lock = SRWLOCK_INIT;
+
+// Jobs run on several worker threads at once: a new entry is stamped with the current step; only empty slots or
+// entries unused for 4+ logic steps are taken (FFX: heap corruption when a fresh entry was evicted mid-copy).
+static ClothSnap* snap_get(float* vtex, uint8_t* actor, uint32_t n, bool create) {
+    AcquireSRWLockExclusive(&g_snap_lock);
+    ClothSnap* s = nullptr; ClothSnap* old = nullptr;
+    LONG now = g_step_n;
+    for (int i = 0; i < NSNAP; i++) {
+        ClothSnap* e = &g_snap[i];
+        if (e->vtex == vtex) { s = e; break; }
+        if (!e->vtex) { if (!old || old->vtex) old = e; }
+        else if (e->ncur < now - 4 && (!old || (old->vtex && e->ncur < old->ncur))) old = e;
+    }
+    if (!s && create && old) { s = old; s->vtex = vtex; s->ncur = now; s->nprev = 0; s->actor = nullptr; }
+    if (s && create && (s->n != n || s->actor != actor)) {
+        free(s->cur); free(s->prev);
+        s->cur = (float*)malloc(n * 16); s->prev = (float*)malloc(n * 16);
+        s->n = (s->cur && s->prev) ? n : 0; s->actor = actor; s->ncur = s->nprev = 0;
+    }
+    ReleaseSRWLockExclusive(&g_snap_lock);
+    return s;
+}
+
+// Calls fn(entry, vertex array, vertex count) for each dynamic mesh of the actor.
+template <class F> static void for_dyn_mesh(uint8_t* a, F fn) {
+    uint8_t* ents = *(uint8_t**)(a + C_ENTS);
+    uint8_t* mdl = *(uint8_t**)(a + C_MDL);
+    if (!ents || !mdl) return;
+    uint32_t ne = *(uint16_t*)(mdl + 6);
+    for (uint32_t e = 0; e < ne; e++) {
+        uint8_t* en = ents + e * C_ENT_STRIDE;
+        uint8_t* desc = *(uint8_t**)en;
+        float* vtex = *(float**)(en + 8);
+        if (!desc || !vtex || (!*(void**)(en + 0x2C) && !*(void**)(en + 0x0C))) continue;
+        uint32_t n = *(uint16_t*)(desc + 4);
+        if (n) fn(en, vtex, n);
+    }
+}
+
+static void cloth_snap_after_step(uint8_t* a, bool reset) {
+    for_dyn_mesh(a, [&](uint8_t*, float* vtex, uint32_t n) {
+        ClothSnap* s = snap_get(vtex, a, n, true);
+        if (!s || !s->n) return;
+        float* t = s->prev; s->prev = s->cur; s->cur = t;
+        s->nprev = reset ? 0 : s->ncur;
+        memcpy(s->cur, vtex, n * 16);
+        s->ncur = g_step_n;
+    });
+}
+
+// True when every dynamic mesh had fresh job results (and the previous tick's, if need_prev); then the mesh is
+// deformed from cur + k * (cur - prev) and the vertex arrays are put back.
+static bool cloth_extrap(uint8_t* a, float k, bool need_prev) {
+    LONG now = g_step_n;
+    bool ok = true;
+    for_dyn_mesh(a, [&](uint8_t*, float* vtex, uint32_t n) {
+        ClothSnap* s = snap_get(vtex, a, n, false);
+        if (!s || s->n != n || s->ncur != now || (need_prev && s->nprev != now - 1)) ok = false;
+    });
+    if (!ok) return false;
+    for_dyn_mesh(a, [&](uint8_t*, float* vtex, uint32_t n) {
+        ClothSnap* s = snap_get(vtex, a, n, false);
+        for (uint32_t v = 0; v < n * 4; v += 4)
+            for (int c = 0; c < 3; c++) vtex[v + c] = s->cur[v + c] + k * (s->cur[v + c] - s->prev[v + c]);
+    });
+    if (*g_deform_gate == 0) g_deform(a);
+    for_dyn_mesh(a, [&](uint8_t*, float* vtex, uint32_t n) {
+        ClothSnap* s = snap_get(vtex, a, n, false);
+        memcpy(vtex, s->cur, n * 16);
+    });
+    return true;
+}
+
 static void __cdecl h_cjob(uint8_t** list, int* count) {
-    if (g_clothhold == 2 && g_walked_inv && !g_disabled && row_SMOOTH003.on) {
+    bool live = !g_disabled && row_SMOOTH003.on && smooth_live(3);
+    if (g_clothhold >= 2 && g_walked_inv && live) {
         bool all = true;
         __try {
             for (int k = 0; k < *count && all; k++) {
@@ -424,12 +516,40 @@ static void __cdecl h_cjob(uint8_t** list, int* count) {
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { all = false; }
         if (all) {
-            if (InterlockedIncrement(&g_cloth_held) == 1)
+            if (g_clothhold >= 3) {
+                __try {
+                    for (int k = 0; k < *count; k++) {
+                        if (g_clothhold == 3 ? cloth_extrap(list[k], g_extrap_pct / 100.0f, true) : cloth_extrap(list[k], 0.0f, false)) {
+                            LONG c = InterlockedIncrement(&g_extrap_n);
+                            if (c == 1) log_line("X2-SMOOTH-003-CLOTHHOLD: first cloth mesh drawn from the job results on a render-only invocation (mode %d, id 0x%04X)",
+                                                 g_clothhold, *(uint16_t*)list[k]);
+                        } else InterlockedIncrement(&g_extrap_miss);
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) { fault("cloth render-only", GetExceptionCode()); }
+            } else if (InterlockedIncrement(&g_cloth_held) == 1)
                 log_line("X2-SMOOTH-003-CLOTHHOLD: first cloth job skipped on a render-only invocation (mode 2)");
             return;
         }
     }
+    if (g_clothhold < 3) { g_cjob_tramp(list, count); return; }
+    // Reset/teleport (+0x824 counter, +0x1A0 bit 0x800000) or an uninitialised mesh: no blend from it.
+    bool reset[8] = {};
+    int n = *count < 8 ? *count : 8;
+    __try {
+        for (int k = 0; k < n; k++) {
+            uint8_t* a = list[k];
+            reset[k] = *(uint16_t*)(a + C_RESET) != 0 || (*(uint32_t*)(a + FLAGS) & 0x800000) != 0;
+            for_dyn_mesh(a, [&](uint8_t* en, float*, uint32_t) { if (*(void**)(en + 0x0C) && !*(int*)(en + 0x34)) reset[k] = true; });
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     g_cjob_tramp(list, count);
+    __try {
+        for (int k = 0; k < n; k++) {
+            cloth_snap_after_step(list[k], reset[k]);
+            if (g_clothhold == 4 && !reset[k] && live) cloth_extrap(list[k], -0.5f, true);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { fault("cloth snap", GetExceptionCode()); }
 }
 
 // ---------------------------------------------------------------- per invocation
@@ -446,9 +566,10 @@ static bool apply_patches() {
             return false;
         }
     }
-    if (g_clothhold == 2) {
+    if (g_clothhold >= 2) {
         if (hook_entry("X2-SMOOTH-003-CLOTHHOLD", g_cjob_fn, (void*)&h_cjob, (void**)&g_cjob_tramp))
-            log_line("X2-SMOOTH-003-CLOTHHOLD: Ch_ClothJob gva=0x%08X hooked: whole job once per logic tick (mode 2)", rt_to_gva(g_cjob_fn));
+            log_line("X2-SMOOTH-003-CLOTHHOLD: Ch_ClothJob gva=0x%08X hooked (mode %d: %s)", rt_to_gva(g_cjob_fn), g_clothhold,
+                     g_clothhold == 4 ? "interpolated half a tick behind" : g_clothhold == 3 ? "extrapolated" : "held, 30 Hz");
         else { g_clothhold = 0; log_line("X2-SMOOTH-003-CLOTHHOLD: hook failed - off"); }
     }
     log_line("X2-SMOOTH-003: %d CALLs retargeted on the game thread", count);
@@ -466,6 +587,7 @@ static void pre() {
         __except (EXCEPTION_EXECUTE_HANDLER) { g_hold_base = nullptr; fault("hold restore", GetExceptionCode()); }
     }
     g_kind = g_disabled ? INV_STOCK : pacing_kind();
+    if (g_kind != INV_BUILD) InterlockedIncrement(&g_step_n);
     bool want = !g_disabled && row_SMOOTH003.on && smooth_live(3) && (g_kind == INV_LOGIC || g_kind == INV_BUILD);
     *g_half = want ? 1 : 0;
     g_half_on = want;
@@ -478,9 +600,9 @@ static void post() {
     if (g_walks - last >= 1800) {
         last = g_walks;
         log_line("X2-SMOOTH-003: walks=%ld stepped=%ld batches=%ld pays=%ld gated(seq=%ld motev=%ld) "
-                 "loopguard(wrap=%ld clamp=%ld hold=%ld) loopend_holds=%ld endx=%ld stock_steps=%ld cloth_held=%ld half=%d live=%d",
+                 "loopguard(wrap=%ld clamp=%ld hold=%ld) loopend_holds=%ld endx=%ld stock_steps=%ld cloth_held=%ld cloth_drawn=%ld cloth_miss=%ld half=%d live=%d",
                  g_walks, g_stepped, g_batches, g_pays, g_gated_seq, g_gated_motev, g_guard_wrap, g_guard_clamp,
-                 g_guard_hold, g_loopend_holds, (LONG)g_endx, g_stock_steps, (LONG)g_cloth_held, *g_half, smooth_live(3));
+                 g_guard_hold, g_loopend_holds, (LONG)g_endx, g_stock_steps, (LONG)g_cloth_held, (LONG)g_extrap_n, (LONG)g_extrap_miss, *g_half, smooth_live(3));
     }
     static LONG reported_s = 0;
     if (!reported_s && g_stock_steps > 0) {
@@ -570,10 +692,11 @@ static bool install() {
         if (!g_prev_ang || !g_cur_ang) { g_endextrap = 0; log_line("  X2-SMOOTH-003: ENDEXTRAP off (out of memory)"); }
     }
     g_shortloop = config_row("X2-SMOOTH-003-SHORTLOOP", 1);
-    g_clothhold = config_row("X2-SMOOTH-003-CLOTHHOLD", 2);
-    if (g_clothhold != 0 && g_clothhold != 2) {
-        log_line("  X2-SMOOTH-003-CLOTHHOLD: mode %d not ported in this build - using mode 2", g_clothhold);
-        g_clothhold = 2;
+    g_clothhold = config_row("X2-SMOOTH-003-CLOTHHOLD", 4);
+    g_extrap_pct = config_row("X2-SMOOTH-003-CLOTHEXTRAP-PCT", 50);
+    if (g_clothhold != 0 && (g_clothhold < 2 || g_clothhold > 4)) {
+        log_line("  X2-SMOOTH-003-CLOTHHOLD: mode %d not available - using mode 4", g_clothhold);
+        g_clothhold = 4;
     }
     if (g_clothhold) {
         // entry through MOV ESI,[EBP+8]; MOV EAX,[ESI+0x1A0]; TEST EAX,0x200000 (cloth actor bit)
@@ -588,6 +711,18 @@ static bool install() {
             g_clothhold = 0;
             g_cjob_fn = nullptr;
             log_line("  X2-SMOOTH-003-CLOTHHOLD: cloth job not found or does not call Ch_ClothSimulate - off");
+        }
+    }
+    if (g_clothhold >= 3) {
+        // job +0x27: CMP dword [gate],0 / JNZ +9 / PUSH EDI / CALL Ch_ClothDeform (verified by the job signature)
+        g_deform_gate = (volatile int32_t*)abs_operand("cloth deform gate", g_cjob_fn + 0x29);
+        g_deform = (void (__cdecl*)(uint8_t*))call_target(g_cjob_fn + 0x31);
+        if (!g_deform_gate || !g_deform || !in_image((void*)g_deform)) {
+            g_clothhold = 2;
+            log_line("  X2-SMOOTH-003-CLOTHHOLD: deform call not at job +0x31 - modes 3/4 unavailable, mode 2");
+        } else {
+            log_line("  X2-SMOOTH-003-CLOTHHOLD: mode %d, deform gva=0x%08X (expected 0x006DAE00), gate gva=0x%08X (0x00DF6440)",
+                     g_clothhold, rt_to_gva((void*)g_deform), rt_to_gva((const void*)g_deform_gate));
         }
     }
     g_hold_buf = (uint8_t*)calloc(MAXA, HOLD_SZ);
