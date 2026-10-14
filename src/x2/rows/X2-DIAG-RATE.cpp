@@ -36,6 +36,45 @@ PROBE_STUB(2)
 PROBE_STUB(3)
 static void (*const g_stubs[4])() = { stub0, stub1, stub2, stub3 };
 
+// Timed probes (U 13/10/2026: a 60 fps screen recording shows the camera "move, move, pause, move, pause" while every
+// game-thread frame is evenly spaced and evenly moved, D F9 traces): call intervals of the app's render (vtable [8]
+// 0x42F7F0) and vtable [10] 0x42F490 (FFX: "present"), i.e. how evenly frames leave the game thread.
+struct TProbe {
+    const char* name;
+    uint32_t    gva;
+    const char* prologue;
+    void*       tramp;
+    LARGE_INTEGER last;
+    double      min, max, sum;
+    int         n, longs, calls;
+};
+static TProbe g_tp[2] = {
+    { "render [8] FUN_0042f7f0", 0x42F7F0, "56 8B F1 80 BE AD 03 00 00 00 74 09 E8" },
+    { "vtable [10] FUN_0042f490", 0x42F490, "56 8B F1 80 BE AD 03 00 00 00 75 15 E8" },
+};
+static LARGE_INTEGER g_tf;
+
+extern "C" void __cdecl x2_tprobe_hit(int i) {
+    TProbe& p = g_tp[i];
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    p.calls++;
+    if (p.last.QuadPart && g_tf.QuadPart) {
+        double dt = (double)(now.QuadPart - p.last.QuadPart) * 1000.0 / (double)g_tf.QuadPart;
+        if (dt < p.min) p.min = dt;
+        if (dt > p.max) p.max = dt;
+        p.sum += dt;
+        p.n++;
+        if (dt > 20.0) p.longs++;
+    }
+    p.last = now;
+}
+
+#define TPROBE_STUB(i)     __declspec(naked) static void tstub##i() { __asm { pushfd } __asm { pushad } __asm { push i }         __asm { call x2_tprobe_hit } __asm { add esp, 4 } __asm { popad } __asm { popfd }         __asm { jmp dword ptr [g_tp + i * TYPE TProbe + 12] } }
+TPROBE_STUB(0)
+TPROBE_STUB(1)
+static void (*const g_tstubs[2])() = { tstub0, tstub1 };
+
 static volatile uint32_t* g_btl_counter = nullptr;
 static uint32_t g_btl_last = 0;
 static bool     g_hooked = false;
@@ -54,6 +93,12 @@ static bool install() {
         if (!sig_match(at, p.prologue)) { log_line("  X2-DIAG-RATE: %s prologue mismatch - not counted", p.name); p.gva = 0; }
     }
     if (g_p[1].gva) g_btl_counter = (volatile uint32_t*)abs_operand("battle entry counter", exe_base() + (0x790F00 - 0x400000) + 2);
+    static_assert(offsetof(TProbe, tramp) == 12, "tstub offset");
+    for (auto& p : g_tp) {
+        p.min = 1e9;
+        if (!sig_match(exe_base() + (p.gva - 0x400000), p.prologue)) { log_line("  X2-DIAG-RATE: %s prologue mismatch - not timed", p.name); p.gva = 0; }
+    }
+    QueryPerformanceFrequency(&g_tf);
     QueryPerformanceFrequency(&g_f);
     QueryPerformanceCounter(&g_t0);
     return true;
@@ -79,6 +124,10 @@ static void pre() {
         uint8_t* at = exe_base() + (g_p[i].gva - 0x400000);
         if (!hook_entry(g_p[i].name, at, (void*)g_stubs[i], &g_p[i].tramp)) g_p[i].gva = 0;
     }
+    for (int i = 0; i < 2; i++) {
+        if (!g_tp[i].gva) continue;
+        if (!hook_entry(g_tp[i].name, exe_base() + (g_tp[i].gva - 0x400000), (void*)g_tstubs[i], &g_tp[i].tramp)) g_tp[i].gva = 0;
+    }
     if (g_btl_counter) g_btl_last = *g_btl_counter;
     log_line("X2-DIAG-RATE: probes hooked");
 }
@@ -89,7 +138,7 @@ static void post() {
     double s = (double)(t.QuadPart - g_t0.QuadPart) / (double)g_f.QuadPart;
     if (s < 5.0) return;
     g_t0 = t;
-    char line[800];
+    char line[1200];
     int k = _snprintf_s(line, sizeof(line), _TRUNCATE, "X2-DIAG-RATE /s: inv LOGIC %.1f BUILD %.1f BACKLOG %.1f STOCK %.1f |",
                         (g_kind[0] - g_kind_last[0]) / s, (g_kind[1] - g_kind_last[1]) / s,
                         (g_kind[2] - g_kind_last[2]) / s, (g_kind[3] - g_kind_last[3]) / s);
@@ -109,6 +158,12 @@ static void post() {
         k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | frame ms min %.1f avg %.2f max %.1f, >20ms %d",
                          g_dt_min, g_dt_sum / g_dt_n, g_dt_max, g_dt_long);
     g_dt_min = 1e9; g_dt_max = 0; g_dt_sum = 0; g_dt_n = 0; g_dt_long = 0;
+    for (auto& p : g_tp) {
+        if (!p.gva || !p.n) continue;
+        k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " | %s %.1f/s ms min %.1f avg %.2f max %.1f >20ms %d",
+                         p.name, p.calls / s, p.min, p.sum / p.n, p.max, p.longs);
+        p.min = 1e9; p.max = 0; p.sum = 0; p.n = 0; p.longs = 0; p.calls = 0;
+    }
     log_line("%s", line);
 }
 
