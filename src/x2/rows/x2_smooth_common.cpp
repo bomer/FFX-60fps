@@ -23,6 +23,17 @@ static bool focused() {
 // F7 (game window focused): SMOOTH rows on/off at runtime, for an A/B look in the same scene.
 // Several SMOOTH rows call this; the static edge state makes the extra calls no-ops.
 void smooth_poll_hotkey() {
+    // F6 (game window focused): one SMOOTH row off at a time, live: X2-SMOOTH-001 (camera) -> 002 (roots) ->
+    // 003 (limbs) -> all on. U 13/10/2026: "ghost character when walking left/right": which row draws it.
+    static bool prev6 = false;
+    bool down6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+    if (down6 && !prev6 && focused()) {
+        g_off_row = (g_off_row + 1) % 4;
+        static const char* const names[4] = { "none (all SMOOTH rows on)", "X2-SMOOTH-001 camera", "X2-SMOOTH-002 roots",
+                                               "X2-SMOOTH-003 limbs" };
+        log_line("F6: SMOOTH row off: %s%s", names[g_off_row], g_live ? "" : " (F7 has all SMOOTH rows off)");
+    }
+    prev6 = down6;
     static bool prev = false;
     bool down = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
     bool edge = down && !prev;
