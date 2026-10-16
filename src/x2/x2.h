@@ -31,6 +31,7 @@ struct Config {
 extern Config g_cfg;
 void config_load();
 int  config_row(const char* row_id, int def);    // [rows] X2-ROW-ID=0|1
+void config_str(const char* sect, const char* key, char* out, int size, const char* def);   // ASCII string key
 
 // ---------------------------------------------------------------- x2_sigs.cpp
 uint8_t*    exe_base();
@@ -65,6 +66,7 @@ bool hooks_install_mainloop();                   // init thread
 bool patch_call_rel32(uint8_t* site, void* old_target, void* new_target);   // verified CALL retarget
 bool patch_u32(void* at, uint32_t v);            // 4-byte write through VirtualProtect (atomic if aligned)
 bool hook_entry(const char* name, void* target, void* detour, void** orig); // MinHook entry hook
+void hook_remove(void* target);                  // undo hook_entry (rows that install several hooks as one)
 void hooks_install_divider_on_game_thread();     // first pre()
 
 // ---------------------------------------------------------------- x2_pacing.cpp
@@ -97,6 +99,11 @@ void rows_install_all();
 bool row_on(const char* id);
 void rows_pre();
 void rows_post();
+
+// Cross-row hooks
+uint8_t* mag006_entry();                         // Ppp_ProgramStep entry (null if X2-MAG-006 is off)
+bool     mag006_pause_exe_caller(uint8_t* ret);  // X2-MAG-006 pauses this EXE call site like a DLL caller
+void     mag026_draw_record(uint8_t* head, uint8_t* nd, void* cb);   // X2-MAG-020 draw-only walk -> X2-MAG-026
 
 // Rollback: a span is snapshotted at the start of every render-only invocation and written back at its end.
 typedef bool (*span_resolver_t)(void* ctx, uint8_t** base, uint32_t* len);

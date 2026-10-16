@@ -33,8 +33,18 @@ static void pre() {
     log_line("QOL-SENSOR: every active party member counts as a Sensor holder");
 }
 
+// Runtime off (CFG-MENU, dev hot reload): the stock JZ back. The Config page is field-only, so no battle is
+// reading the bit test meanwhile.
+static void stop() {
+    if (!g_patched) return;
+    g_patched = false;
+    static const uint8_t jz[2] = { 0x74, 0x1C };
+    if (sig_match(g_jz, "90 90") && patch_write(g_jz, jz, 2)) log_line("QOL-SENSOR: off - Sensor from armor only");
+    else log_line("QOL-SENSOR: could not restore the JZ");
+}
+
 Row row_QOLSENSOR = {
     "QOL-SENSOR",
     "gameplay option: every party member has the Sensor effect (enemy HP/info on targeting) without armor",
-    0, install, pre, nullptr, 0
+    0, install, pre, nullptr, 0, stop
 };

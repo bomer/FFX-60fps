@@ -7,7 +7,9 @@
 static volatile LONG g_live = 1;
 static volatile LONG g_off_row = 0;              // Ctrl+F7: 0 = none, else SMOOTH-00<n> alone off
 
-bool smooth_master() { return config_row("SMOOTH", 1) != 0; }
+static volatile LONG g_master_force = 0;         // CFG-MENU turned SMOOTH on while the ini says SMOOTH=0
+
+bool smooth_master() { return g_master_force || config_row("SMOOTH", 1) != 0; }
 
 bool smooth_live(int row) { return g_live != 0 && (row == 0 || row != g_off_row); }
 
@@ -38,6 +40,23 @@ void smooth_poll_hotkey() {
     if (!edge || !focused()) return;
     g_live = g_live ? 0 : 1;
     log_line("F7: SMOOTH rows %s", g_live ? "ON" : "OFF (installed, pass-through)");
+}
+
+// CFG-MENU (game thread): the menu's Smooth switch is F7's. On: SMOOTH rows that never installed (SMOOTH=0 at
+// start) install now, except one turned off by its own key; off: installed rows pass through, as F7 off.
+bool smooth_enabled() { return g_live && (row_SMOOTH001.on || row_SMOOTH002.on || row_SMOOTH003.on); }
+
+void smooth_set(bool on) {
+    if (on) {
+        g_master_force = 1;
+        Row* rows[3] = { &row_SMOOTH001, &row_SMOOTH002, &row_SMOOTH003 };
+        for (Row* r : rows) {
+            if (!r->installed && !config_row(r->id, r->default_on)) continue;
+            row_set(*r, true);
+        }
+    }
+    g_live = on ? 1 : 0;
+    log_line("SMOOTH: rows %s (Config menu)", on ? "ON" : "OFF (installed, pass-through)");
 }
 
 static inline float dot3(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }

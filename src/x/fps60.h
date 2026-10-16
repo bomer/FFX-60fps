@@ -35,6 +35,7 @@ extern Config g_cfg;
 void config_load();
 int  config_row(const char* row_id, int def);   // [rows] ROW_ID=0|1
 void config_str(const char* sect, const char* key, char* buf, int n, const char* def);
+bool config_write(const char* sect, const char* key, const char* value);   // game-folder fps60.ini
 
 
 // ---------------------------------------------------------------- sigs.cpp (ported from FRAMEDIFF)
@@ -93,7 +94,9 @@ bool pacing_divider_request(uint32_t req);       // from the divider hook; true 
 bool pacing_active();                            // 60 Hz pacing currently applied
 int  pacing_kind();                              // InvKind of the current invocation
 void pacing_hold_stock(const char* who, bool hold); // a row asks for stock pacing (e.g. FMV)
+void pacing_set(bool on);                         // runtime 60 Hz on/off ([fps60] pacing; CFG-MENU)
 void pacing_force_logic(bool on);                // every invocation a logic tick, kind INV_BACKLOG (booster)
+bool sr008_battle_reset_pending();               // rows/SR-003.cpp: SR-008 soft reset in battle under way
 
 // ---------------------------------------------------------------- rollback.cpp
 // A span is snapshotted at the start of every INV_BUILD invocation and written back at its end,
@@ -118,6 +121,7 @@ struct Row {
     void (*post)();              // optional
     int         on;              // resolved: ini toggle && install ok
     void (*stop)();              // optional: undo state held between invocations (dev hot reload, reload.cpp)
+    int         installed;       // install() ran and succeeded (at startup, or later through row_set)
 };
 extern Row row_MAG008;                           // rows/MAG-008.cpp
 extern Row row_MAG006;                           // rows/MAG-006.cpp
@@ -151,7 +155,9 @@ extern Row row_PERF001;                         // rows/PERF-001.cpp (1 ms timer
 extern Row row_PERF002;                         // rows/PERF-002.cpp (stock 30 fps when 60 is not held)
 extern Row row_QOLSENSOR;                       // rows/QOL-SENSOR.cpp (gameplay: party always has Sensor)
 extern Row row_BOOST001;                        // rows/BOOST-001.cpp (game speed booster 2x/4x at 60 Hz)
-extern Row row_QOLAP;                           // rows/QOL-AP.cpp (gameplay: whole party earns AP)
+extern Row row_QOLAP;
+extern Row row_QOLRETRY;                        // rows/QOL-RETRY.cpp (gameplay: Retry / Title after a wipe)                           // rows/QOL-AP.cpp (gameplay: whole party earns AP)
+extern Row row_CFGMENU;                         // rows/CFG-MENU.cpp (mod options in the game's Config page)
 extern Row row_TEXANIM001;                      // rows/TEXANIM-001.cpp (chr texture animation per logic tick)
 extern Row row_DIAG_DYNGEO;                    // rows/DIAG-DYNGEO.cpp (dynamic-geometry upload diag)
 extern Row row_SR003;                          // rows/SR-003.cpp (soft reset chord -> title)
@@ -173,8 +179,14 @@ void* mag008_dispatch();                         // MAG-008: MsBattleScene_DrawD
 const char* mag021_state();                     // MAG-021: window state, for the crash line
 bool  mag021_in_window(const void* base);        // MAG-021: module replayed in the current window
 int   famE_find_setter(uint8_t* mod, uint32_t size, uint8_t** hit); // MAG-018: family-E exec-pause setter count
+int   qol_ap_rate();                             // QOL-AP: AP percent for members who did not fight
+void  qol_ap_set_rate(int pct);                  // QOL-AP: runtime change (CFG-MENU), clamped 0..100
 void rows_install_all();
 bool row_on(const char* id);                     // false = that row is turned off (rollback skips its spans)
+// Runtime switch, game thread only (CFG-MENU). On: a row that is off in the ini is installed now (its pre() applies
+// its patches on the next invocation). Off: Row::stop undoes what the row holds, then pre/post stop running.
+// Returns the row's resulting on state.
+bool row_set(Row& r, bool on);
 void rows_pre();
 void rows_stop_all();                           // dev hot reload: Row::stop of every row that is on
 void rows_post();

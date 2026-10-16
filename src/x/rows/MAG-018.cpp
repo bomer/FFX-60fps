@@ -24,6 +24,15 @@ static const char PAT[] =
     "C7 00 01 00 00 00 C7 05 ?? ?? ?? ?? 01 00 00 00 C3 "
     "C7 00 00 00 00 00 C7 05 ?? ?? ?? ?? 00 00 00 00 C3";
 
+// MAG-018-DIRECT: the uncached variant (6 DLLs: 0198, 0341, 0481, 0483, 0499, 0519): the draw writes (exec==0)
+// straight into the pause flag and the update returns while it is 1 (magic_0499: draw 0x100018D0, update test
+// 0x10001508 CMP [ECX],0; JNE; Luca Yuna-rescue battle soft-lock, U 16/10/2026). MOV ECX,[ptr var] at +10.
+static const char PAT_DIRECT_A[] =
+    "8B 80 F4 03 00 00 FF D0 8B 0D ?? ?? ?? ?? FF 35 ?? ?? ?? ?? F7 D8 1B C0 40 89 01";
+static const char PAT_DIRECT_B[] =
+    "8B 80 F4 03 00 00 FF D0 8B 0D ?? ?? ?? ?? F7 D8 1B C0 40 89 01";
+static bool g_direct = true;
+
 // Shared with MAG-021: number of exec-pause setters in a loaded module's code (1 = family E with this
 // shape); *hit = the first one.
 int famE_find_setter(uint8_t* mod, uint32_t size, uint8_t** hit_out) {
@@ -37,6 +46,23 @@ static void scan(FamE& m) {
     m.scanned = true;
     uint8_t* hit = nullptr;
     int hits = famE_find_setter(m.mod, m.size, &hit);
+    if (hits == 0 && g_direct) {
+        int ha = 0, hb = 0;
+        uint8_t* da = sig_scan_module(m.mod, m.size, PAT_DIRECT_A, &ha);
+        uint8_t* db = sig_scan_module(m.mod, m.size, PAT_DIRECT_B, &hb);
+        uint8_t* d = ha == 1 && hb == 0 ? da : ha == 0 && hb == 1 ? db : nullptr;
+        if (d) {
+            uint32_t pv = *(uint32_t*)(d + 10), lo = (uint32_t)(uintptr_t)m.mod, hi = lo + m.size;
+            if (pv >= lo && pv < hi) {
+                m.cache = nullptr;
+                m.ptr_var = (int32_t* volatile*)(uintptr_t)pv;
+                log_line("MAG-018-DIRECT: %s uncached exec-pause setter at gva 0x%08X: pause-pointer var gva 0x%08X",
+                         m.name, 0x10000000u + (uint32_t)(d - m.mod), 0x10000000u + (pv - lo));
+                return;
+            }
+        }
+        if (ha + hb) log_line("MAG-018-DIRECT: %s has %d/%d uncached pause setters - not handled", m.name, ha, hb);
+    }
     if (hits != 1) {
         if (hits > 1) log_line("MAG-018: %s has %d pause setters - not handled", m.name, hits);
         m.mod = nullptr;                          // not family E (or ambiguous): forget it
@@ -75,6 +101,7 @@ static void on_unload(uint8_t* base) {
 }
 
 static bool install() {
+    g_direct = config_row("MAG-018-DIRECT", 1) != 0;
     if (!magic_mods_subscribe("MAG-018", on_load, on_unload)) return false;
     log_line("  MAG-018: watching magic DLL loads for the family-E exec-pause setter");
     return true;
@@ -87,7 +114,12 @@ static void pre() {
         if (!m.mod) continue;
         __try {
             if (!m.scanned) scan(m);
-            if (!m.mod || !m.cache || !logic || g_disabled) continue;
+            if (!m.mod || !m.ptr_var || !logic || g_disabled) continue;
+            if (!m.cache) {                       // MAG-018-DIRECT: no cache, the update reads the flag itself
+                int32_t* pf = *m.ptr_var;
+                if (pf && *pf == 1) { *pf = 0; InterlockedIncrement(&g_resets); InterlockedIncrement(&g_pause_resets); }
+                continue;
+            }
             if (*m.cache == 1) {
                 *m.cache = 0;
                 InterlockedIncrement(&g_resets);

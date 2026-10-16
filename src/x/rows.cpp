@@ -42,6 +42,8 @@ static Row* g_rows[] = {
     &row_BOOST001,
     &row_QOLSENSOR,
     &row_QOLAP,
+    &row_QOLRETRY,
+    &row_CFGMENU,                                // after the rows it switches
     &row_FX010,
     &row_DIAG_BTLSIG,
     &row_DIAG_DRAWSTEP,
@@ -68,7 +70,7 @@ void rows_install_all() {
         bool ok = false;
         __try { ok = r.install ? r.install() : true; }
         __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-        r.on = ok ? 1 : 0;
+        r.on = r.installed = ok ? 1 : 0;
         if (ok) on++;
         log_line("row %-10s %s - %s", r.id, ok ? "ON" : "FAILED to install, stays off", r.summary);
     }
@@ -78,6 +80,29 @@ void rows_install_all() {
 bool row_on(const char* id) {
     for (Row** p = g_rows; *p; p++) if (strcmp((*p)->id, id) == 0) return (*p)->on != 0;
     return true;                                 // not a registered row: never gated
+}
+
+bool row_set(Row& r, bool on) {
+    if (on == (r.on != 0)) return on;
+    if (on) {
+        if (!r.installed) {
+            bool ok = false;
+            __try { ok = r.install ? r.install() : true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+            r.installed = ok ? 1 : 0;
+            log_line("row %-10s %s at runtime - %s", r.id, ok ? "installed" : "FAILED to install, stays off", r.summary);
+            if (!ok) return false;
+        }
+        r.on = 1;
+    } else {
+        if (r.stop) {
+            __try { r.stop(); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { log_line("rows: %s stop faulted", r.id); }
+        }
+        r.on = 0;
+    }
+    log_line("row %-10s %s at runtime", r.id, on ? "ON" : "OFF");
+    return on;
 }
 
 // Diagnostic hotkey F8: turn the camera rows (LOOP-005, LOOP-004) off/on at runtime, to tell whether

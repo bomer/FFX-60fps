@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_DIAGPRESENT, row_DEVBISECT;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -21,9 +21,16 @@ static Row* g_rows[] = {
     &row_W2A002,                                 // rows/X2-W2A-002.cpp
     &row_CLK002,                                 // rows/X2-CLK-002.cpp
     &row_MAG006,                                 // rows/X2-MAG-006.cpp
+    &row_FX010DRAWOPS,                           // rows/X2-FX-010-DRAWOPS.cpp
     &row_UI014,                                  // rows/X2-UI-014.cpp
     &row_TEXANIM001,                             // rows/X2-TEXANIM-001.cpp
     &row_MAG016,                                 // rows/X2-MAG-016.cpp (record driver, 79 magic DLLs)
+    &row_MAG030,                                 // rows/X2-MAG-030.cpp (T record driver, 71 magic DLLs)
+    &row_MAG020,                                 // rows/X2-MAG-020.cpp (family-X node walk)
+    &row_MAG026,                                 // rows/X2-MAG-026.cpp (family-X records; after MAG-006, MAG-020)
+    &row_MAG025,                                 // rows/X2-MAG-025.cpp (OPU effect-unit walker)
+    &row_TASK001,                                // rows/X2-TASK-001.cpp (actor render tasks replayed)
+    &row_SR003,                                  // rows/X2-SR-003.cpp (soft reset, field + battle)
     &row_MENU002,                                // rows/X2-MENU-002.cpp (field main menu at 60 Hz)
     &row_MENU001,                                // rows/X2-MENU-001.cpp
     &row_TITLE001,                               // rows/X2-TITLE-001.cpp
@@ -33,6 +40,7 @@ static Row* g_rows[] = {
     &row_DIAGRATE,                               // rows/X2-DIAG-RATE.cpp (diagnostic, default 0)
     &row_DIAGDRAWSTEP,                           // rows/X2-DIAG-DRAWSTEP.cpp (diagnostic, default 0)
     &row_DIAGPRESENT,                            // rows/X2-DIAG-PRESENT.cpp (diagnostic, default 0)
+    &row_DIAGPPPOPS,                             // rows/X2-DIAG-PPPOPS.cpp (diagnostic, default 0)
     &row_DEVBISECT,                              // rows/X2-DEV-BISECT.cpp (test tool, F8; must stay last)
     nullptr
 };

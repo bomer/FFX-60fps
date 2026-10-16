@@ -41,8 +41,8 @@ uint32_t rt_to_gva_exe(const void* rt) {
 
 // ---------------------------------------------------------------- pattern scanning
 struct Pattern {
-    uint8_t bytes[96];
-    uint8_t mask[96];   // 1 = must match
+    uint8_t bytes[128];   // tools/sigcheck.py MAX_PATTERN must match
+    uint8_t mask[128];    // 1 = must match
     int     len;
 };
 

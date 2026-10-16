@@ -38,6 +38,14 @@ void pacing_hold_stock(const char* who, bool hold) {
 
 void pacing_force_logic(bool on) { g_force_logic = on; }
 
+// Runtime 60/30 switch (CFG-MENU, game thread). pacing_pre picks it up at the next invocation: leaving 60 Hz hands the
+// game its divider back, entering re-asserts divider 1 (the same transitions as a stock holder).
+void pacing_set(bool on) {
+    if ((g_cfg.pacing != 0) == on) return;
+    g_cfg.pacing = on ? 1 : 0;
+    log_line("pacing: %s at runtime", on ? "60 Hz" : "stock 30");
+}
+
 bool pacing_divider_request(uint32_t req) {
     uint32_t prev = g_wanted;
     g_wanted = req;

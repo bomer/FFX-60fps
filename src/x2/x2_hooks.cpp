@@ -107,6 +107,12 @@ bool hook_entry(const char* name, void* target, void* detour, void** orig) {
     return true;
 }
 
+void hook_remove(void* target) {
+    if (!mh_ready()) return;
+    MH_DisableHook(target);
+    MH_RemoveHook(target);
+}
+
 static set_divider_t g_divider_tramp = nullptr;
 
 static void __cdecl h_set_divider(uint32_t req) {

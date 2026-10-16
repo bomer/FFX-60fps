@@ -46,6 +46,14 @@ void config_str(const char* sect, const char* key, char* buf, int n, const char*
     GetPrivateProfileStringA(sect, key, def, buf, n, g_ini);
 }
 
+// WritePrivateProfileString edits the key in place (comments and other keys stay; a missing key is added to its
+// section). Used by CFG-MENU when the player leaves the Config page.
+bool config_write(const char* sect, const char* key, const char* value) {
+    if (WritePrivateProfileStringA(sect, key, value, g_ini)) return true;
+    log_line("config: writing [%s] %s=%s failed (error %lu)", sect, key, value, GetLastError());
+    return false;
+}
+
 int config_row(const char* row_id, int def) {
     // user-facing switches in [fps60] that stand for a row: soft_reset=<buttons>|0|off (SR-003)
     if (!strcmp(row_id, "SR-003")) {

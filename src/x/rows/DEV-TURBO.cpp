@@ -152,8 +152,20 @@ static void pre() {
     }
 }
 
+// Runtime off (CFG-MENU, dev hot reload): a turbo held at that moment is released (pre no longer runs to see the key
+// go up); the hooks stay and pass through.
+static void stop() {
+    if (!g_held) return;
+    g_held = false;
+    log_line("DEV-TURBO: off (row stopped)");
+    if (g_sound_fn && *g_booster_on == 0) {
+        __try { g_sound_fn(0); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { g_sound_fn = nullptr; }
+    }
+}
+
 Row row_DEVTURBO = {
     "DEV-TURBO",
     "test tool: hold a key (DEV-TURBO-KEY) to run the game DEV-TURBO-SPEED times faster via its own turbo/backlog path",
-    1, install, pre, nullptr, 0
+    1, install, pre, nullptr, 0, stop
 };

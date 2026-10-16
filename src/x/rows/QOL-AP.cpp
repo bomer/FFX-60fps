@@ -31,7 +31,7 @@ static int        g_ko = 1, g_rate = 100, g_dt = 1;
 static bool       g_patched = false;
 
 static void __stdcall h_gate() {
-    if (g_disabled) { g_gate(); return; }
+    if (g_disabled || !row_QOLAP.on) { g_gate(); return; }   // off at runtime (CFG-MENU): the retarget stays
     bool qual[8] = {}, added[8] = {};
     int32_t before[8] = {};
     for (int i = 0; i < 8; i++) {
@@ -103,23 +103,39 @@ static bool install() {
     return true;
 }
 
+static bool g_dt_on = false;
+
 static void pre() {
-    if (g_patched) return;
-    g_patched = true;
-    if (!patch_call_rel32(g_site, (void*)g_gate, (void*)&h_gate)) {
-        log_line("QOL-AP: call retarget failed - row off");
-        row_QOLAP.on = 0;
-        return;
+    if (!g_patched) {
+        g_patched = true;
+        if (!patch_call_rel32(g_site, (void*)g_gate, (void*)&h_gate)) {
+            log_line("QOL-AP: call retarget failed - row off");
+            row_QOLAP.on = 0;
+            return;
+        }
+        log_line("QOL-AP: battle-end AP gate wrapped");
     }
-    if (g_dt_jz) {
+    if (g_dt_jz && !g_dt_on) {
+        g_dt_on = true;
         static const uint8_t jz[2] = { 0x74, 0x16 };   // -> 0x798A47 MOV EDI,[EBP+0x14] (Double/Triple tests)
-        if (!sig_match(g_dt_jz, "74 2C") || !patch_write(g_dt_jz, jz, 2)) log_line("QOL-AP-DT: patch failed");
+        if (!sig_match(g_dt_jz, "74 2C") || !patch_write(g_dt_jz, jz, 2)) { log_line("QOL-AP-DT: patch failed"); g_dt_jz = nullptr; }
     }
-    log_line("QOL-AP: battle-end AP gate wrapped");
 }
+
+// Runtime off (CFG-MENU, dev hot reload): h_gate passes through while the row is off; the Double/Triple JZ goes
+// back to stock (the Config page is field-only, so no kill is being credited meanwhile).
+static void stop() {
+    if (!g_dt_on) return;
+    g_dt_on = false;
+    static const uint8_t jz[2] = { 0x74, 0x2C };
+    if (!g_dt_jz || !sig_match(g_dt_jz, "74 16") || !patch_write(g_dt_jz, jz, 2)) log_line("QOL-AP-DT: could not restore the JZ");
+}
+
+int  qol_ap_rate() { return g_rate; }
+void qol_ap_set_rate(int pct) { g_rate = pct < 0 ? 0 : pct > 100 ? 100 : pct; }
 
 Row row_QOLAP = {
     "QOL-AP",
     "gameplay option: every party member earns AP after a battle (QOL-AP-KO, QOL-AP-RATE, QOL-AP-DT)",
-    0, install, pre, nullptr, 0
+    0, install, pre, nullptr, 0, stop
 };

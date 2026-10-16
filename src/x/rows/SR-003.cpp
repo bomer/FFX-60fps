@@ -77,6 +77,7 @@ static const char* blocked() {
 // the idle gate closed, H), the state goes to 2 as the opcode does (`if (a8e0 == 1) a8e0 = 2`).
 static int  g_btl_pending = 0;                  // logic ticks since the battle reset was requested, 0 = none
 static bool g_btl_kicked = false;
+bool sr008_battle_reset_pending() { return g_btl_pending != 0; }   // QOL-RETRY: a soft reset goes to the title
 
 static void battle_reset_tick() {
     int8_t bs = rd<int8_t>(0x0112A8E0);
