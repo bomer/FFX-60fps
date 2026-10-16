@@ -33,6 +33,7 @@ static_assert(sizeof(CfgRow) == 0x2C, "Config row object is 0x2C bytes");
 
 typedef void (__cdecl* enter_t)(void* desc);
 typedef uint8_t* (__cdecl* text_t)(uint32_t id);
+typedef void (__cdecl* draw_t)();
 
 enum { ID_LABEL = 0xF00, ID_VALUE = 0xF40, ID_ON = 0x0B, ID_OFF = 0x0C, MAX_STOCK = 16 };
 
@@ -46,25 +47,15 @@ static bool g_hooked = false;
 static volatile int32_t* g_desc_state = nullptr;    // page descriptor +0x1C (from the enter's argument)
 static bool g_dirty = false;
 
-// CFG-MENU-BARS (default 1): each row draws a 60-unit bar (FUN_008cb530: FLD [60.0] at 0x8CB548, + 6 units of shadow)
-// and a 54-unit strip (FUN_008cbae0: FLD [54.0] at 0x8CBC7D), sized for 8 rows at 740/8 = 92.5 apart. With 16 rows
-// (46 apart) they ran into the next row (U 16/10/2026 screenshot). The two FLD operands point at these floats
-// instead (the .rdata constants are shared), sized from the row count at page enter. Both functions are Config only.
-static uint8_t* g_bar_fld = nullptr;  static uint32_t g_bar_orig = 0;
-static uint8_t* g_strip_fld = nullptr; static uint32_t g_strip_orig = 0;
-static float    g_bar_h = 60.0f, g_strip_h = 54.0f;
-static bool     g_bars_patched = false;
-
-static void size_bars(int count) {
-    float s = 740.0f / (float)(count > 0 ? count : 8);
-    g_bar_h = s - 6.0f < 60.0f ? s - 6.0f : 60.0f;   // bar + its shadow fill one row step
-    g_strip_h = g_bar_h - 6.0f;                       // stock: strip = bar - 6, drawn 3 units below the bar top
-}
-
-static bool patch_operand(uint8_t* fld, const void* target) {
-    uint32_t v = (uint32_t)(uintptr_t)target;
-    return patch_write(fld + 2, &v, 4);
-}
+// CFG-MENU-SCROLL (default 1): the row draw spaces rows 740/count apart and sizes each bar for 8 rows, so 16 rows ran
+// into each other (U 16/10/2026; thinner bars cut through the text, same day). Cfg_DrawRows 0x8CBAB0 (no args, plain
+// RET, one caller 0x8CB33A) is detoured: around the original, the row array, count and cursor are pointed at a window
+// of the stock row count (8) that follows the cursor, so the page looks stock and scrolls; up/down still walk the
+// whole list. The HD row 0 test (DAT_0186a438, read only by the row draw) is moved off the window when the window
+// does not start at row 0.
+static uint8_t* g_draw_fn = nullptr; static draw_t g_draw = nullptr;
+static volatile int32_t* g_row0 = nullptr;          // DAT_0186a438
+static int g_top = 0;
 
 // ---------------------------------------------------------------- options
 // v = value index as shown: binary rows are ON (0) / OFF (1), the stock order.
@@ -171,6 +162,30 @@ static void __cdecl row_apply(CfgRow* r) {
 }
 
 // ---------------------------------------------------------------- detours
+static void __cdecl h_draw() {
+    if (g_disabled || !g_row0 || *g_array != (void*)g_arr || g_stock_n <= 0 || *g_count <= g_stock_n) { g_draw(); return; }
+    int n = *g_count, vis = g_stock_n, cur = *g_cursor;
+    if (cur < 0) cur = 0;
+    if (cur >= n) cur = n - 1;
+    if (cur < g_top) g_top = cur;
+    if (cur >= g_top + vis) g_top = cur - vis + 1;
+    if (g_top > n - vis) g_top = n - vis;
+    if (g_top < 0) g_top = 0;
+    int8_t  save_cur = *g_cursor;
+    int32_t save_row0 = *g_row0;
+    *g_array = &g_arr[g_top];
+    *g_count = vis;
+    *g_cursor = (int8_t)(cur - g_top);
+    if (g_top) *g_row0 = -1;                        // row 0 (HD) not in the window: no window slot is it
+    __try { g_draw(); }
+    __finally {
+        *g_array = g_arr;
+        *g_count = n;
+        *g_cursor = save_cur;
+        *g_row0 = save_row0;
+    }
+}
+
 static void __cdecl h_enter(void* desc) {
     if (!g_disabled && row_CFGMENU.on) {
         __try {
@@ -178,12 +193,12 @@ static void __cdecl h_enter(void* desc) {
             int   n = *g_count;
             if (cur == (void*)g_arr) { cur = g_stock; n = g_stock_n; }   // entered again with ours still in place
             else { g_stock = cur; g_stock_n = n; }
+            g_top = 0;
             if (cur && n > 0 && n <= MAX_STOCK) {
                 memcpy(g_arr, cur, n * sizeof(void*));
                 for (int i = 0; i < N_OPTS; i++) g_arr[n + i] = &g_rows[i];
                 *g_array = g_arr;
                 *g_count = n + N_OPTS;
-                size_bars(n + N_OPTS);
                 g_desc_state = (volatile int32_t*)((uint8_t*)desc + 0x1C);
                 static bool once = false;
                 if (!once) { once = true; log_line("CFG-MENU: Config page opened: %d stock rows + %d mod rows", n, N_OPTS); }
@@ -267,22 +282,18 @@ static bool install() {
     g_count = (volatile int32_t*)read_abs(g_enter_fn + 0x23);
     g_array = (void* volatile*)read_abs(g_enter_fn + 0x31);
     if (!g_cursor || !g_count || !g_array) return false;
-    if (config_row("CFG-MENU-BARS", 1)) {
-        // FUN_008cb530 +0x18: FLD [60.0]; FSTP [ESP]; CALL y-scale; FSTP [EBP-4]; ADD ESP,4; FLD [EBP-4]; FADD [EBP+0xC]
-        g_bar_fld = sig_find_unique("CFG-MENU-BARS bar height",
-            "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 5D FC 83 C4 04 D9 45 FC D8 45 0C 68 00 00 00 26", 0x8CB548);
-        // FUN_008cbae0: FLD [54.0]; FSTP [ESP]; CALL y-scale; FSTP [ESP]; PUSH ECX; FLD [654.0]; ...; FLD double [EBP-0x230]
-        g_strip_fld = sig_find_unique("CFG-MENU-BARS strip height",
-            "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 DD 85 D0 FD FF FF",
-            0x8CBC7D);
-        float* b = g_bar_fld ? (float*)read_abs(g_bar_fld + 2) : nullptr;
-        float* t = g_strip_fld ? (float*)read_abs(g_strip_fld + 2) : nullptr;
-        if (b && t && *b == 60.0f && *t == 54.0f) {
-            g_bar_orig = *(uint32_t*)(g_bar_fld + 2);
-            g_strip_orig = *(uint32_t*)(g_strip_fld + 2);
+    if (config_row("CFG-MENU-SCROLL", 1)) {
+        // Cfg_DrawRows: PUSH ESI; CALL; XOR ESI,ESI; CMP [count],ESI; JLE; loop { PUSH ESI; PUSH 0; PUSH 0; CALL row; ...}
+        g_draw_fn = sig_find_unique("CFG-MENU-SCROLL Cfg_DrawRows",
+            "56 E8 ?? ?? ?? ?? 33 F6 39 35 ?? ?? ?? ?? 7E 1B 56 6A 00 6A 00 E8 ?? ?? ?? ?? 83 C4 0C E8 ?? ?? ?? ?? 46 3B 35", 0x8CBAB0);
+        // Cfg_DrawRow 0x8CBB7D: ADD ESP,8; CMP ESI,[row0]; JNZ +0x60; LEA EAX,[EBP-0x204]; PUSH EAX; PUSH 0x1CD; CALL
+        uint8_t* r0 = sig_find_unique("CFG-MENU-SCROLL HD row test",
+            "83 C4 08 3B 35 ?? ?? ?? ?? 75 60 8D 85 FC FD FF FF 50 68 CD 01 00 00 E8", 0x8CBB7D);
+        if (g_draw_fn && r0 && (volatile int32_t*)read_abs(r0 + 5) && read_abs(g_draw_fn + 10) == (uint8_t*)(uintptr_t)g_count) {
+            g_row0 = (volatile int32_t*)read_abs(r0 + 5);
         } else {
-            log_line("  CFG-MENU-BARS: bar/strip height constants not found (%.1f, %.1f) - bars stay stock", b ? *b : -1.0f, t ? *t : -1.0f);
-            g_bar_fld = g_strip_fld = nullptr;
+            g_draw_fn = nullptr;
+            log_line("  CFG-MENU-SCROLL: row draw not found - all rows on one page");
         }
     }
 
@@ -317,17 +328,14 @@ static void pre() {
             !hook_entry("CFG-MENU enter", g_enter_fn, (void*)&h_enter, (void**)&g_enter)) {
             hook_remove("CFG-MENU label", g_label_fn);
             hook_remove("CFG-MENU help", g_help_fn);
+            hook_remove("CFG-MENU enter", g_enter_fn);
             log_line("CFG-MENU: hook failed - row off");
             row_CFGMENU.on = 0;
             return;
         }
         log_line("CFG-MENU: Config page hooked on the game thread");
-    }
-    if (g_bar_fld && !g_bars_patched) {
-        g_bars_patched = true;
-        if (patch_operand(g_bar_fld, &g_bar_h) && patch_operand(g_strip_fld, &g_strip_h))
-            log_line("CFG-MENU-BARS: row bar and strip heights follow the row count");
-        else log_line("CFG-MENU-BARS: patch failed");
+        if (g_draw_fn && !hook_entry("CFG-MENU-SCROLL draw", g_draw_fn, (void*)&h_draw, (void**)&g_draw)) g_row0 = nullptr;
+        else if (g_draw_fn) log_line("CFG-MENU-SCROLL: %d rows visible, the list scrolls with the cursor", 8);
     }
     if (g_dirty && g_desc_state && *g_desc_state > 3) write_ini();
 }
@@ -338,11 +346,6 @@ static void stop() {
     __try {
         if (g_array && *g_array == (void*)g_arr && g_stock) { *g_array = g_stock; *g_count = g_stock_n; *g_cursor = 0; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    if (g_bars_patched) {
-        g_bars_patched = false;
-        patch_write(g_bar_fld + 2, &g_bar_orig, 4);
-        patch_write(g_strip_fld + 2, &g_strip_orig, 4);
-    }
     if (g_dirty) write_ini();
 }
 
