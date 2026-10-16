@@ -37,15 +37,28 @@ static bool has_xfade(const uint8_t* base, uint32_t size) {
     return has_needle(base, size, "kohno corss fade begin") || has_needle(base, size, "ky: *** Chr Packet Size");
 }
 static uint8_t* g_xbase[8];
+static bool     g_xown[8];                       // matched by string (only these start a chain: one hop)
+// Chain: a DLL loaded within 500 ms of a passed DLL's unload is passed too (the dressphere change runs magic_0646 ->
+// magic_0938 -> magic_0931 back to back, 2-3 ms apart; 0938 has neither string; U 16/10/2026 20:45 still blinked).
+static volatile DWORD g_chain_until = 0;
 static void on_load(uint8_t* base, uint32_t size, const char* name) {
-    if (!has_xfade(base, size)) return;
+    bool chained = g_chain_until && (LONG)(GetTickCount() - g_chain_until) < 0;
+    bool own = has_xfade(base, size);
+    if (!own) {
+        if (!chained) return;
+        log_line("X2-MAG-008-PASS: %s loaded right after a passed DLL - passed too (chain)", name);
+    }
     for (int i = 0; i < 8; i++)
-        if (!g_xbase[i]) { g_xbase[i] = base; InterlockedIncrement(&g_pass_loaded); break; }
+        if (!g_xbase[i]) { g_xbase[i] = base; g_xown[i] = own; InterlockedIncrement(&g_pass_loaded); break; }
     log_line("X2-MAG-008-PASS: %s is a cross-fade / ky model DLL - exec==0 dispatch runs on render-only invocations while loaded", name);
 }
 static void on_unload(uint8_t* base) {
     for (int i = 0; i < 8; i++)
-        if (g_xbase[i] == base) { g_xbase[i] = nullptr; InterlockedDecrement(&g_pass_loaded); }
+        if (g_xbase[i] == base) {
+            g_xbase[i] = nullptr;
+            InterlockedDecrement(&g_pass_loaded);
+            g_chain_until = g_xown[i] ? GetTickCount() + 500 : 0;
+        }
 }
 
 static void __cdecl h_fallback_dispatch(int pass) {
