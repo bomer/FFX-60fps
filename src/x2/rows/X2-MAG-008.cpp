@@ -22,21 +22,26 @@ static int  g_pass_on = 1;                       // [rows] X2-MAG-008-PASS
 static volatile LONG g_pass_loaded = 0;          // cross-fade DLLs loaded now
 extern Row row_MAG008;
 
-static bool has_xfade(const uint8_t* base, uint32_t size) {
-    static const char k[] = "kohno corss fade begin";
-    const uint32_t n = sizeof(k) - 1;
+// Families passed (strings in the DLL image): "kohno corss fade begin" (63 cross-fade DLLs, dressphere change) and
+// "ky: *** Chr Packet Size" (62 "ky" overlays that load their own character model, e.g. magic_0931 after the change:
+// model + fire effect still blinked with the first family alone, U 16/10/2026 20:41).
+static bool has_needle(const uint8_t* base, uint32_t size, const char* k) {
+    const uint32_t n = (uint32_t)strlen(k);
     __try {
         for (uint32_t i = 0; i + n <= size; i++)
-            if (base[i] == 'k' && memcmp(base + i, k, n) == 0) return true;
+            if (base[i] == (uint8_t)k[0] && memcmp(base + i, k, n) == 0) return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return false;
+}
+static bool has_xfade(const uint8_t* base, uint32_t size) {
+    return has_needle(base, size, "kohno corss fade begin") || has_needle(base, size, "ky: *** Chr Packet Size");
 }
 static uint8_t* g_xbase[8];
 static void on_load(uint8_t* base, uint32_t size, const char* name) {
     if (!has_xfade(base, size)) return;
     for (int i = 0; i < 8; i++)
         if (!g_xbase[i]) { g_xbase[i] = base; InterlockedIncrement(&g_pass_loaded); break; }
-    log_line("X2-MAG-008-PASS: %s is a cross-fade DLL - exec==0 dispatch runs on render-only invocations while loaded", name);
+    log_line("X2-MAG-008-PASS: %s is a cross-fade / ky model DLL - exec==0 dispatch runs on render-only invocations while loaded", name);
 }
 static void on_unload(uint8_t* base) {
     for (int i = 0; i < 8; i++)
