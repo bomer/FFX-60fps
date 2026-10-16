@@ -31,6 +31,7 @@ static uint8_t* g_pause_exe[4];
 static int      g_npause_exe = 0;
 static volatile LONG g_exe_paused_calls = 0;
 uint8_t* mag006_entry() { return row_MAG006.on ? g_entry : nullptr; }
+volatile int32_t* mag006_pause_flag() { return g_pause; }   // 0x01CF579C (null before install)
 bool mag006_pause_exe_caller(uint8_t* ret) {
     if (g_npause_exe >= 4) return false;
     g_pause_exe[g_npause_exe++] = ret;
