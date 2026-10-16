@@ -46,6 +46,26 @@ static bool g_hooked = false;
 static volatile int32_t* g_desc_state = nullptr;    // page descriptor +0x1C (from the enter's argument)
 static bool g_dirty = false;
 
+// CFG-MENU-BARS (default 1): each row draws a 60-unit bar (FUN_008cb530: FLD [60.0] at 0x8CB548, + 6 units of shadow)
+// and a 54-unit strip (FUN_008cbae0: FLD [54.0] at 0x8CBC7D), sized for 8 rows at 740/8 = 92.5 apart. With 16 rows
+// (46 apart) they ran into the next row (U 16/10/2026 screenshot). The two FLD operands point at these floats
+// instead (the .rdata constants are shared), sized from the row count at page enter. Both functions are Config only.
+static uint8_t* g_bar_fld = nullptr;  static uint32_t g_bar_orig = 0;
+static uint8_t* g_strip_fld = nullptr; static uint32_t g_strip_orig = 0;
+static float    g_bar_h = 60.0f, g_strip_h = 54.0f;
+static bool     g_bars_patched = false;
+
+static void size_bars(int count) {
+    float s = 740.0f / (float)(count > 0 ? count : 8);
+    g_bar_h = s - 6.0f < 60.0f ? s - 6.0f : 60.0f;   // bar + its shadow fill one row step
+    g_strip_h = g_bar_h - 6.0f;                       // stock: strip = bar - 6, drawn 3 units below the bar top
+}
+
+static bool patch_operand(uint8_t* fld, const void* target) {
+    uint32_t v = (uint32_t)(uintptr_t)target;
+    return patch_write(fld + 2, &v, 4);
+}
+
 // ---------------------------------------------------------------- options
 // v = value index as shown: binary rows are ON (0) / OFF (1), the stock order.
 static int  get_fps()     { return g_cfg.pacing ? 0 : 1; }
@@ -163,6 +183,7 @@ static void __cdecl h_enter(void* desc) {
                 for (int i = 0; i < N_OPTS; i++) g_arr[n + i] = &g_rows[i];
                 *g_array = g_arr;
                 *g_count = n + N_OPTS;
+                size_bars(n + N_OPTS);
                 g_desc_state = (volatile int32_t*)((uint8_t*)desc + 0x1C);
                 static bool once = false;
                 if (!once) { once = true; log_line("CFG-MENU: Config page opened: %d stock rows + %d mod rows", n, N_OPTS); }
@@ -246,6 +267,24 @@ static bool install() {
     g_count = (volatile int32_t*)read_abs(g_enter_fn + 0x23);
     g_array = (void* volatile*)read_abs(g_enter_fn + 0x31);
     if (!g_cursor || !g_count || !g_array) return false;
+    if (config_row("CFG-MENU-BARS", 1)) {
+        // FUN_008cb530 +0x18: FLD [60.0]; FSTP [ESP]; CALL y-scale; FSTP [EBP-4]; ADD ESP,4; FLD [EBP-4]; FADD [EBP+0xC]
+        g_bar_fld = sig_find_unique("CFG-MENU-BARS bar height",
+            "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 5D FC 83 C4 04 D9 45 FC D8 45 0C 68 00 00 00 26", 0x8CB548);
+        // FUN_008cbae0: FLD [54.0]; FSTP [ESP]; CALL y-scale; FSTP [ESP]; PUSH ECX; FLD [654.0]; ...; FLD double [EBP-0x230]
+        g_strip_fld = sig_find_unique("CFG-MENU-BARS strip height",
+            "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 DD 85 D0 FD FF FF",
+            0x8CBC7D);
+        float* b = g_bar_fld ? (float*)read_abs(g_bar_fld + 2) : nullptr;
+        float* t = g_strip_fld ? (float*)read_abs(g_strip_fld + 2) : nullptr;
+        if (b && t && *b == 60.0f && *t == 54.0f) {
+            g_bar_orig = *(uint32_t*)(g_bar_fld + 2);
+            g_strip_orig = *(uint32_t*)(g_strip_fld + 2);
+        } else {
+            log_line("  CFG-MENU-BARS: bar/strip height constants not found (%.1f, %.1f) - bars stay stock", b ? *b : -1.0f, t ? *t : -1.0f);
+            g_bar_fld = g_strip_fld = nullptr;
+        }
+    }
 
     for (int i = 0; i < N_OPTS; i++) {
         const Opt& o = k_opts[i];
@@ -284,6 +323,12 @@ static void pre() {
         }
         log_line("CFG-MENU: Config page hooked on the game thread");
     }
+    if (g_bar_fld && !g_bars_patched) {
+        g_bars_patched = true;
+        if (patch_operand(g_bar_fld, &g_bar_h) && patch_operand(g_strip_fld, &g_strip_h))
+            log_line("CFG-MENU-BARS: row bar and strip heights follow the row count");
+        else log_line("CFG-MENU-BARS: patch failed");
+    }
     if (g_dirty && g_desc_state && *g_desc_state > 3) write_ini();
 }
 
@@ -293,6 +338,11 @@ static void stop() {
     __try {
         if (g_array && *g_array == (void*)g_arr && g_stock) { *g_array = g_stock; *g_count = g_stock_n; *g_cursor = 0; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (g_bars_patched) {
+        g_bars_patched = false;
+        patch_write(g_bar_fld + 2, &g_bar_orig, 4);
+        patch_write(g_strip_fld + 2, &g_strip_orig, 4);
+    }
     if (g_dirty) write_ini();
 }
 
