@@ -33,8 +33,19 @@ static bool has_needle(const uint8_t* base, uint32_t size, const char* k) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return false;
 }
+// X2-MAG-008-PASS=2 (test mode): also the 310-DLL effect template (magic_0938 / magic_0904 shape, FUN_10001330
+// prologue below), e.g. magic_0904 at the start of a second dressphere change (U 16/10/2026 23:10: still blinks).
+// The same template carries most battle effects, so this mode is expected to bring back 2x effects: test only.
+static const uint8_t TPL[] = {0x55, 0x8B, 0xEC, 0x53, 0x8B, 0x5D, 0x08, 0x56, 0x8B, 0x8B, 0xD0, 0x00, 0x00, 0x00, 0x57,
+    0x8B, 0x41, 0x14, 0xA3};
 static bool has_xfade(const uint8_t* base, uint32_t size) {
-    return has_needle(base, size, "kohno corss fade begin") || has_needle(base, size, "ky: *** Chr Packet Size");
+    if (has_needle(base, size, "kohno corss fade begin") || has_needle(base, size, "ky: *** Chr Packet Size")) return true;
+    if (g_pass_on != 2) return false;
+    __try {
+        for (uint32_t i = 0; i + sizeof(TPL) <= size; i++)
+            if (base[i] == 0x55 && memcmp(base + i, TPL, sizeof(TPL)) == 0) return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
 }
 static uint8_t* g_xbase[8];
 static bool     g_xown[8];                       // matched by string (only these start a chain: one hop)
