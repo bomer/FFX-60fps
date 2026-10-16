@@ -115,6 +115,7 @@
     <ClCompile Include="src\x2\rows\X2-MAG-026.cpp" />
     <ClCompile Include="src\x2\rows\X2-MAG-025.cpp" />
     <ClCompile Include="src\x2\rows\X2-MAG-019.cpp" />
+    <ClCompile Include="src\x2\rows\X2-MAG-027.cpp" />
     <ClCompile Include="src\x2\rows\X2-TASK-001.cpp" />
     <ClCompile Include="src\x2\rows\X2-SR-003.cpp" />
     <ClCompile Include="src\x2\rows\X2-FX-010-DRAWOPS.cpp" />
