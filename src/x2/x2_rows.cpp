@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DEVBISECT;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_MAG019, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -29,6 +29,7 @@ static Row* g_rows[] = {
     &row_MAG020,                                 // rows/X2-MAG-020.cpp (family-X node walk)
     &row_MAG026,                                 // rows/X2-MAG-026.cpp (family-X records; after MAG-006, MAG-020)
     &row_MAG025,                                 // rows/X2-MAG-025.cpp (OPU effect-unit walker)
+    &row_MAG019,                                 // rows/X2-MAG-019.cpp (VFX shader lookup guard)
     &row_TASK001,                                // rows/X2-TASK-001.cpp (actor render tasks replayed)
     &row_SR003,                                  // rows/X2-SR-003.cpp (soft reset, field + battle)
     &row_MENU002,                                // rows/X2-MENU-002.cpp (field main menu at 60 Hz)
