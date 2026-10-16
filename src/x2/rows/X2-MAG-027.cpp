@@ -7,9 +7,11 @@
 // next logic one), and a handler's start / end phase runs twice: magic_0681's cross-fade handler FUN_10006830 frees its
 // buffer at the end tick (_aligned_free) - twice = heap corruption, U 16/10/2026 23:11 (0xC0000374, WER dump, stack
 // magic_0681 draw -> FUN_10003220 -> FUN_10003500 -> FUN_10006830 -> msvcr110 free).
-// Fix: on render-only invocations the events whose start or end equals the clock are taken out of the list for that
-// walk (the list is restored right after), so start / end phases run once, on the logic invocation; events strictly
-// inside their range still run (per-frame draws). If the shortened list let the walk mark the timeline finished
+// Fix: on render-only invocations the events whose start equals the clock are taken out of the list for that walk
+// (they appear on the logic invocation), and events whose end equals the clock get end+1 for that walk, so they run
+// their in-range phase (draw) instead of the end phase; list and end fields are restored right after. Start / end
+// phases run once, on the logic invocation. (First build hid end events too: each element vanished for one frame as
+// it ended, U 16/10/2026 23:24 "blink" in Full Throttle, magic_0681, 97 hidden in 18 s.) If the shortened list let the walk mark the timeline finished
 // (clock 0xFFFF), the clock is put back: the logic invocation decides.
 // Evidence: outer repo re/ledger/CRASH-0681.md (S + D).
 #include "../x2.h"
@@ -23,7 +25,7 @@ typedef void(__fastcall* walk_t)(void* list, void* edx);
 enum { MAX_SLOTS = 8, MAX_EV = 256 };
 struct Slot { uint8_t* mod; uint32_t size; uint8_t* entry; walk_t orig; char name[24]; };
 static Slot g_slots[MAX_SLOTS];
-static volatile LONG g_hidden = 0, g_walks = 0, g_kept_clock = 0;
+static volatile LONG g_hidden = 0, g_extended = 0, g_walks = 0, g_kept_clock = 0;
 extern Row row_MAG027;
 
 // prologue PUSH EBP; MOV EBP,ESP; SUB ESP,0xC; PUSH EBX/ESI/EDI; MOV EDI,ECX; MOV ECX,0xFFFF; MOV EAX,[EDI];
@@ -49,7 +51,8 @@ static void __fastcall h_walk(void* list, void* edx) {
     if (!row_MAG027.on || g_disabled || !render_only()) { s->orig(list, edx); return; }
     uint16_t** ev = (uint16_t**)list;
     uint16_t* saved[MAX_EV + 2];
-    int n = 0;
+    uint16_t* ended[MAX_EV];
+    int n = 0, ne = 0;
     bool changed = false;
     uint16_t* hdr = ev[0];
     int16_t clock = 0;
@@ -65,15 +68,17 @@ static void __fastcall h_walk(void* list, void* edx) {
         int w = 1;
         for (int i = 1; i < n; i++) {
             uint16_t* e = saved[i];
-            if ((int)e[1] == (int)(uint16_t)clock || (int)e[2] == (int)(uint16_t)clock) { InterlockedIncrement(&g_hidden); changed = true; continue; }
+            if ((int)e[1] == (int)(uint16_t)clock) { InterlockedIncrement(&g_hidden); changed = true; continue; }
+            if ((int)e[2] == (int)(uint16_t)clock && e[2] != 0xFFFE) { e[2]++; ended[ne++] = e; InterlockedIncrement(&g_extended); }
             ev[w++] = e;
         }
         ev[w] = saved[n];                            // terminator (its end field is the timeline length)
     }
     InterlockedIncrement(&g_walks);
     s->orig(list, edx);
-    if (changed) {
-        memcpy(ev, saved, (n + 1) * sizeof(void*));
+    for (int i = 0; i < ne; i++) ended[i][2]--;
+    if (changed || ne) {
+        if (changed) memcpy(ev, saved, (n + 1) * sizeof(void*));
         if (hdr[3] == 0xFFFF && clock != -1) { hdr[3] = (uint16_t)clock; InterlockedIncrement(&g_kept_clock); }
     }
 }
@@ -122,8 +127,8 @@ static void on_unload(uint8_t* mod) {
         Slot& s = g_slots[i];
         if (s.mod != mod) continue;
         hook_remove(s.entry);
-        log_line("X2-MAG-027: %s unloaded, slot %d freed (boundary events hidden so far %ld, clock kept %ld)", s.name, i,
-                 g_hidden, g_kept_clock);
+        log_line("X2-MAG-027: %s unloaded, slot %d freed (start events hidden %ld, end events drawn in range %ld, clock kept %ld)",
+                 s.name, i, g_hidden, g_extended, g_kept_clock);
         s.mod = nullptr;
         s.orig = nullptr;
     }
