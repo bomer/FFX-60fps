@@ -5,9 +5,11 @@
 // 0x616660(1) -> FUN_006a5d30 -> OPP walk FUN_006b98e0 -> particle code 0x80EBF0 / 0x852880 -> FUN_004568c0 vtable
 // +0x28 -> FUN_004b9d50. FFX: the 60 Hz cadence of paused draws exposes it (Thunder/Thundara).
 // Fix: entry detour; while data [this+0x1C] is null, its material count [data+0x84] < 1, the material array
-// [data+0x88] is null or material[0].name [+0x24] is null/unreadable, return 0 without running the original. The
-// caller FUN_004568c0 treats 0 as "go on" (nonzero aborts), so nothing is created and the sub-instance is set up on
-// a later call. Trips are counted per invocation kind.
+// [data+0x88] is null or material[0].name [+0x24] is null/unreadable, return 1 without running the original: the
+// caller FUN_004568c0 aborts on nonzero and its caller FUN_00852880 (0x852A61) runs the game's own failure path
+// FUN_00456270 (frees the VFX instance's dynamic geometry), so nothing half-built survives and a later draw sets it up
+// again. Returning 0 ("go on", the FFX choice) left the instance without its shader object [this+0xC] and crashed in
+// FUN_004baa10 (0x4BAA3E, D 16/10/2026 19:58). Trips are counted per invocation kind.
 // Evidence: outer repo re/ledger/CRASH-0749.md (S + D).
 #include "../x2.h"
 #include <string.h>
@@ -46,7 +48,7 @@ static int __fastcall h_lookup(void* self, void* edx, int a) {
         if (n <= 5 || n % 100 == 0)
             log_line("X2-MAG-019: shader setup skipped, materials not set (this %p, kind %d, trip #%ld of this kind)",
                      self, k, n);
-        return 0;
+        return 1;                                // abort: FUN_00852880 frees the instance (FUN_00456270)
     }
     return g_tramp(self, edx, a);
 }
