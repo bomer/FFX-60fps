@@ -15,6 +15,7 @@
 // U 14/10/2026: "main menu animation seems 30fps, can we make it 60fps without speeding it up" - windows sliding first.
 // Evidence: outer repo re/ledger/MENU-SMOOTH.md, re/ledger/MENU.md §2/§5 (S).
 #include "../x2.h"
+#include <string.h>
 
 namespace x2 {
 
@@ -33,6 +34,14 @@ static int                g_t_parity = 1;        // [rows] X2-MENU-002-PARITY
 // pause flag is held at 1 and put back after the pass (U 16/10/2026: a second Items->Use cursor still blinked 2x;
 // ITEM-CURSOR.md section 6, H that this is that cursor).
 static int                g_t_particle = 1;
+// X2-MENU-002-PARITY2: the two parity getters FUN_007645b0 / FUN_00762900 (MOVZX EAX,byte [0x16BC586]; RET) return, on
+// render-only invocations while this row runs the menu, the value read on the last logic invocation. U 16/10/2026: the
+// command-bar "Use" arrow (FUN_0078ad60, inactive cursor 0x78AF88 `CALL getter; TEST AL,1`) still blinked 2x with the
+// PARITY undo alone (ITEM-CURSOR.md section 7; why the undo missed it is H).
+typedef int(__cdecl* getter_t)();
+static int      g_t_parity2 = 1;
+static getter_t g_pget[2] = {};
+static volatile LONG g_platch = 0, g_pheld = 0;
 static volatile int32_t*  g_ppause = nullptr;
 static int32_t g_ppause_saved = 0;
 static bool g_ppause_held = false;
@@ -43,6 +52,14 @@ static volatile int32_t*  g_req = nullptr;       // 0x00DF6870 request, -1 = non
 static volatile uint32_t* g_mode = nullptr;      // 0x016BC5EC mode
 
 static bool  g_active = false;     // this invocation: main menu claimed
+static int pget(int k) {
+    int v = g_pget[k]();
+    if (!g_t_parity2 || !g_active || !render_only()) { g_platch = v; return v; }
+    InterlockedIncrement(&g_pheld);
+    return g_platch;
+}
+static int __cdecl h_pget0() { return pget(0); }
+static int __cdecl h_pget1() { return pget(1); }
 static bool  g_pass_render = false, g_blend = false, g_fade_saved_ok = false;
 static int32_t g_fade_saved = 0;
 static uint32_t g_serial = 1;
@@ -336,6 +353,7 @@ static bool install() {
     g_drawreplay = config_row("X2-MENU-002-DRAWREPLAY", 1);
     g_t_parity = config_row("X2-MENU-002-PARITY", 1);
     g_t_particle = config_row("X2-MENU-002-PARTICLE", 1);
+    g_t_parity2 = config_row("X2-MENU-002-PARITY2", 1);
     g_ppause = mag006_pause_flag();
     if (g_t_particle && !g_ppause) log_line("  X2-MENU-002-PARTICLE: particle pause flag unknown (X2-MAG-006 off) - part off");
     g_t_tween = config_row("X2-MENU-002-TWEEN", 1);
@@ -373,6 +391,31 @@ static bool install() {
     void* dummy = nullptr;
     if (!hook_entry("X2-MENU-002 Tween_GetValue", gv, (void*)&h_get_value, &dummy) ||
         !hook_entry("X2-MENU-002 Tween_GetPhase", gp, (void*)&h_get_phase, &dummy)) return false;
+    if (g_t_parity2) {
+        // command bar: CALL getter 0x7645B0; TEST AL,1; JZ ... (0x78AF88) and CMP [ESI+0x48],0; JG; CALL getter 0x762900 (0x78AF5F)
+        uint8_t* b = sig_find("X2-MENU-002-PARITY2 cmdbar cursor branch",
+            "80 7E 48 00 7F 23 E8 ?? ?? ?? ?? 50 8B 45 08 6A 2E 83 C0 FD 50 57 E8", 0x78AF5F);
+        // the inactive-cursor CALL follows at +0x29 (its own pattern has a twin at 0x78B1B7)
+        uint8_t* a = b && sig_match(b + 0x29, "E8 ?? ?? ?? ?? A8 01 74 14 8B 45 08 6A 00 6A 2E 83 C0 FD 50 57 E8") ? b + 0x29 : nullptr;
+        uint8_t* ga = a ? call_target(a) : nullptr;
+        uint8_t* gb = b ? call_target(b + 6) : nullptr;
+        uint8_t want[8] = {0x0F, 0xB6, 0x05, 0, 0, 0, 0, 0xC3};
+        uint32_t pa = (uint32_t)(uintptr_t)g_parity;
+        memcpy(want + 3, &pa, 4);
+        if (!ga || !gb || ga == gb || memcmp(ga, want, 8) != 0 || memcmp(gb, want, 8) != 0) {
+            log_line("  X2-MENU-002-PARITY2: parity getters not as proven - part off");
+            g_t_parity2 = 0;
+        } else {
+            if (!hook_entry("X2-MENU-002 parity getter A", ga, (void*)&h_pget0, (void**)&g_pget[0]) ||
+                !hook_entry("X2-MENU-002 parity getter B", gb, (void*)&h_pget1, (void**)&g_pget[1])) {
+                log_line("  X2-MENU-002-PARITY2: hook failed - part off");
+                g_t_parity2 = 0;
+            } else {
+                log_line("  X2-MENU-002-PARITY2: parity getters gva=0x%08X / 0x%08X (expected 0x007645B0 / 0x00762900) latched on render-only passes",
+                         rt_to_gva(ga), rt_to_gva(gb));
+            }
+        }
+    }
     if (!patch_call_rel32(gt, gate, (void*)&h_gate)) return false;
     if (!patch_call_rel32(tl + 0x0C, tasks, (void*)&h_tasks)) {
         patch_call_rel32(gt, (void*)&h_gate, gate);
