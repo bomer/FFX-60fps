@@ -45,7 +45,11 @@ static TweenRec g_rec[256];
 static int g_nrec = 0;
 extern Row row_MENU002;
 
-static bool main_menu_mode(uint32_t m) { m &= 0xFFFF0000u; return m == 0 || m == 0x04000000u; }
+// Field main menu = mode 0 (pad open, Sg_MenuRequestTest 0x604E67). Mode 0x4000000 is the BATTLE pause menu: requested
+// by FUN_0061e440 (0x61E5DA) on Start while battle state [0xDF68A0] == 1. Claiming it ran the pause menu at 60 Hz with
+// its logic halved and crashed (friend's log 16/10/2026 09:15, "crash when he pause the game in combat").
+static bool main_menu_mode(uint32_t m) { return (m & 0xFFFF0000u) == 0; }
+static bool g_battle_menu = false;   // a 0x4000000 request was seen; never claim until every menu is closed
 
 // Parts, each with an ini key and a numpad hotkey (game window focused, logged). U 14/10/2026: "hotkey to turn on/off
 // each of them mid game so i can choose what to keep".
@@ -109,7 +113,9 @@ static void poll_hotkeys() {
 bool menu002_claims() {
     if (!row_MENU002.on || !g_user_on || g_disabled || !g_cfg.pacing || !g_up) return false;
     int32_t req = *g_req;
-    if (*g_up == 0 && *g_up2 == 0 && req == -1) return false;   // no menu up or requested
+    if (*g_up == 0 && *g_up2 == 0 && req == -1) { g_battle_menu = false; return false; }   // no menu up or requested
+    if (req != -1 && ((uint32_t)req & 0xFFFF0000u) == 0x04000000u) g_battle_menu = true;
+    if (g_battle_menu) return false;                                // battle pause menu: X2-MENU-001 holds stock
     return req != -1 ? main_menu_mode((uint32_t)req) : main_menu_mode(*g_mode);
 }
 
