@@ -28,14 +28,6 @@ static tween_step_t g_tween_step = nullptr;      // trampoline of 0x772EB0
 static volatile int32_t*  g_counter = nullptr;   // 0x01CCE9B8 cursor / blink counter
 static volatile uint8_t*  g_parity = nullptr;    // 0x016BC586 menu parity byte: item-use cursor clock (ITEM-CURSOR.md)
 static int                g_t_parity = 1;        // [rows] X2-MENU-002-PARITY
-// X2-MENU-002-PARTICLE: menu particle effects (FUN_005e9440 -> Ppp_ProgramStep, groups 0/3 from the coroutine, group 2
-// from the item target draw) step their clock (+8) and frame (+0x78) on every pass; on render-only passes the engine's
-// pause flag is held at 1 and put back after the pass (U 16/10/2026: a second Items->Use cursor still blinked 2x;
-// ITEM-CURSOR.md section 6, H that this is that cursor).
-static int                g_t_particle = 1;
-static volatile int32_t*  g_ppause = nullptr;
-static int32_t g_ppause_saved = 0;
-static bool g_ppause_held = false;
 static volatile int32_t*  g_fade = nullptr;      // 0x016BDCE8 fade ramp value
 static volatile int32_t*  g_up = nullptr;        // 0x016BC55C menu in progress
 static volatile int32_t*  g_up2 = nullptr;       // 0x016BC560
@@ -147,7 +139,6 @@ static int __cdecl h_gate() {
     InterlockedIncrement(&g_render_passes);
     (*g_counter)--;                                   // undo this pass's INC (0x76473A ran before the gate)
     if (g_t_parity) (*g_parity)--;                    // and INC byte [0x16BC586] (0x764734): Items->Use cursors
-    if (g_t_particle && g_ppause) { g_ppause_saved = *g_ppause; *g_ppause = 1; g_ppause_held = true; }
     g_fade_saved = *g_fade;                           // restored after the pass (post)
     g_fade_saved_ok = true;
     return 0x7FFFFFFF;                                // CMP [0xDF6414],EAX; JL -> step block skipped
@@ -250,7 +241,6 @@ static void pre() {
 
 static void post() {
     if (g_pass_render && g_fade_saved_ok) *g_fade = g_fade_saved;   // the ramp ran once more this pass: undo it
-    if (g_ppause_held) { *g_ppause = g_ppause_saved; g_ppause_held = false; }
     for (int i = 0; i < g_nvars; i++) {                // put the stepped values back
         BlendVar& v = g_vars[i];
         if (v.wrote && var_get(v) == v.mid) var_set(v, v.post);
@@ -335,9 +325,6 @@ static bool install() {
     g_task0 = first - 0xC;
     g_drawreplay = config_row("X2-MENU-002-DRAWREPLAY", 1);
     g_t_parity = config_row("X2-MENU-002-PARITY", 1);
-    g_t_particle = config_row("X2-MENU-002-PARTICLE", 1);
-    g_ppause = mag006_pause_flag();
-    if (g_t_particle && !g_ppause) log_line("  X2-MENU-002-PARTICLE: particle pause flag unknown (X2-MAG-006 off) - part off");
     g_t_tween = config_row("X2-MENU-002-TWEEN", 1);
     g_t_point = config_row("X2-MENU-002-POINT", 1);
     g_t_backdrop = config_row("X2-MENU-002-BACKDROP", 1);

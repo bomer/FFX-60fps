@@ -102,7 +102,6 @@ void rows_post();
 
 // Cross-row hooks
 uint8_t* mag006_entry();                         // Ppp_ProgramStep entry (null if X2-MAG-006 is off)
-volatile int32_t* mag006_pause_flag();           // particle pause flag 0x01CF579C (resolved by X2-MAG-006)
 bool     mag006_pause_exe_caller(uint8_t* ret);  // X2-MAG-006 pauses this EXE call site like a DLL caller
 void     mag026_draw_record(uint8_t* head, uint8_t* nd, void* cb);   // X2-MAG-020 draw-only walk -> X2-MAG-026
 
