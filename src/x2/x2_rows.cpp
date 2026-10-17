@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_MAG019, row_MAG027, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_PERF001, row_DEVBISECT;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_MAG019, row_MAG027, row_MAGSTOCK, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -31,6 +31,7 @@ static Row* g_rows[] = {
     &row_MAG025,                                 // rows/X2-MAG-025.cpp (OPU effect-unit walker)
     &row_MAG019,                                 // rows/X2-MAG-019.cpp (VFX shader lookup guard)
     &row_MAG027,                                 // rows/X2-MAG-027.cpp (cross-fade timeline boundary events)
+    &row_MAGSTOCK,                               // rows/X2-MAG-STOCK.cpp (stock pacing while listed DLLs load)
     &row_TASK001,                                // rows/X2-TASK-001.cpp (actor render tasks replayed)
     &row_SR003,                                  // rows/X2-SR-003.cpp (soft reset, field + battle)
     &row_MENU002,                                // rows/X2-MENU-002.cpp (field main menu at 60 Hz)
@@ -39,7 +40,6 @@ static Row* g_rows[] = {
     &row_SMOOTH001,                              // rows/X2-SMOOTH-001.cpp (60 Hz promotion)
     &row_SMOOTH002,                              // rows/X2-SMOOTH-002.cpp (60 Hz promotion)
     &row_SMOOTH003,                              // rows/X2-SMOOTH-003.cpp (60 Hz promotion, limbs)
-    &row_PERF001,                                // rows/X2-PERF-001.cpp (1 ms timer, no power throttling)
     &row_DIAGRATE,                               // rows/X2-DIAG-RATE.cpp (diagnostic, default 0)
     &row_DIAGDRAWSTEP,                           // rows/X2-DIAG-DRAWSTEP.cpp (diagnostic, default 0)
     &row_DIAGPRESENT,                            // rows/X2-DIAG-PRESENT.cpp (diagnostic, default 0)
