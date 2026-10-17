@@ -586,6 +586,90 @@ static void chr_put() {
     *ctx = saved;
 }
 
+// QOL-RETRY-WATCH (diagnostic, default 0): restoring her whole chr object on Retry did not help; the retry's battle
+// start rebuilt the part slots in the form-2 setup (D 03:58). After the restore, hardware write breakpoints on the
+// game thread watch four of her fields (+0x1474 record state, +0xE42C part motion id, +0xE700 and +0x10900 part
+// enable flags); a vectored handler logs each write (EIP and the EBP chain, FFX.exe addresses as Ghidra VAs), up to
+// 6 per field, and the watch is cleared after 600 invocations. A helper thread sets the debug registers (the game
+// thread cannot set its own).
+static int g_watch_on = 0;
+static DWORD g_game_tid = 0;
+static uintptr_t g_wa[4];
+static volatile LONG g_whits[4];
+static int g_watch_left = 0;
+static PVOID g_veh = nullptr;
+
+static LONG CALLBACK watch_veh(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = ep->ContextRecord;
+    DWORD hit = c->Dr6 & 0xF;
+    if (!hit) return EXCEPTION_CONTINUE_SEARCH;
+    c->Dr6 = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!(hit & (1u << i)) || InterlockedIncrement(&g_whits[i]) > 6) continue;
+        char chain[128]; int n = 0;
+        uint8_t* eb = exe_base(); uint32_t es = exe_size();
+        uintptr_t bp = c->Ebp;
+        for (int d = 0; d < 6 && bp && n < (int)sizeof(chain) - 12; d++) {
+            uintptr_t ret = 0, next = 0;
+            __try { next = *(uintptr_t*)bp; ret = *(uintptr_t*)(bp + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+            if ((uint8_t*)ret >= eb && (uint8_t*)ret < eb + es) n += _snprintf(chain + n, sizeof(chain) - n, " %08X", rt_to_gva_exe((void*)ret));
+            else n += _snprintf(chain + n, sizeof(chain) - n, " r%08X", (uint32_t)ret);
+            if (next <= bp) break;
+            bp = next;
+        }
+        chain[n] = 0;
+        uint8_t* eip = (uint8_t*)(uintptr_t)c->Eip;
+        bool in_exe = eip >= eb && eip < eb + es;
+        log_line("QOL-RETRY-WATCH: write to +%05X = %08X at %s%08X (a8e0 0x%02X) chain%s",
+                 (unsigned)(g_wa[i] - (uintptr_t)g_cs[0].obj), *(uint32_t*)g_wa[i], in_exe ? "gva " : "rt ",
+                 in_exe ? rt_to_gva_exe(eip) : (uint32_t)(uintptr_t)eip, *g_a8e0, chain);
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static DWORD WINAPI watch_set_thread(LPVOID on) {
+    HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, g_game_tid);
+    if (!h) return 0;
+    if (SuspendThread(h) != (DWORD)-1) {
+        CONTEXT c = {};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(h, &c)) {
+            if (on) {
+                c.Dr0 = g_wa[0]; c.Dr1 = g_wa[1]; c.Dr2 = g_wa[2]; c.Dr3 = g_wa[3];
+                DWORD dr7 = 0;
+                for (int i = 0; i < 4; i++) dr7 |= (1u << (i * 2)) | (1u << (16 + i * 4)) | (3u << (18 + i * 4));   // L, RW=01 write, LEN=11 4 bytes
+                c.Dr7 = dr7;
+            } else {
+                c.Dr7 = 0;
+            }
+            c.Dr6 = 0;
+            SetThreadContext(h, &c);
+        }
+        ResumeThread(h);
+    }
+    CloseHandle(h);
+    return 0;
+}
+
+static void watch_arm(uint8_t* obj) {
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+    static const uint32_t offs[4] = { 0x1474, 0xE42C, 0xE700, 0x10900 };
+    for (int i = 0; i < 4; i++) { g_wa[i] = (uintptr_t)obj + offs[i]; g_whits[i] = 0; }
+    HANDLE t = CreateThread(nullptr, 0, watch_set_thread, (LPVOID)1, 0, nullptr);
+    if (t) CloseHandle(t);
+    g_watch_left = 600;
+    log_line("QOL-RETRY-WATCH: write watch armed on chr %p", obj);
+}
+
+static void watch_step() {                          // from pre(), each invocation
+    if (g_watch_left > 0 && --g_watch_left == 0) {
+        HANDLE t = CreateThread(nullptr, 0, watch_set_thread, (LPVOID)0, 0, nullptr);
+        if (t) CloseHandle(t);
+        log_line("QOL-RETRY-WATCH: watch cleared (hits %ld %ld %ld %ld)", g_whits[0], g_whits[1], g_whits[2], g_whits[3]);
+    }
+}
+
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
     if (g_chrfix && !g_disabled && mode == 0 && !g_reissue) chr_take();
@@ -631,6 +715,7 @@ static int __cdecl h_post(int scripted, uint32_t key, int stage, int result) {
         __try {
             restore();
             if (g_chrfix) chr_put();
+            if (g_watch_on && g_cs_n > 0 && g_game_tid) watch_arm(g_cs[0].obj);
             rearm_request();
             g_post_args[0] = scripted; g_post_args[1] = (int)key; g_post_args[2] = stage; g_post_args[3] = result;
             g_reissue = 1;
@@ -704,6 +789,8 @@ static void pre() {
             log_line("QOL-RETRY-DIFF: load chr hook failed - not logged");
     }
     if (g_disabled) return;
+    g_game_tid = GetCurrentThreadId();
+    watch_step();
     __try {
         diff_step();
         if (g_reissue) {                             // retry armed: the field branch should start the battle
@@ -831,6 +918,7 @@ static bool install() {
     g_diff = config_row("QOL-RETRY-DIFF", 0);
     g_partfix = config_row("QOL-RETRY-PARTFIX", 0);
     g_chrfix = config_row("QOL-RETRY-CHR", 0);
+    g_watch_on = config_row("QOL-RETRY-WATCH", 0);
     if (g_diff)                                      // one match in fps60_image.bin
         g_chrload_fn = sig_find_unique("QOL-RETRY-DIFF load chr FUN_0082a1c0",
             "55 8B EC 81 EC 84 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 53 8B 5D 14 56 8B 75 08 57 68 80 00 00 00", 0x82A1C0);
