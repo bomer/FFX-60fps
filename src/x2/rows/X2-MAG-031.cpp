@@ -6,7 +6,10 @@
 // draw (magic_0718 has the same shape). U 17/10/2026: battle simulator soft-lock twice (Seymour vs Tidus, auto battle),
 // both right after magic_0424 unloaded; D: flag = 1 at the end of every invocation, no pppFpStopStatus call, X2-MAG-006
 // not inside a paused step (outer repo re/ledger/HANG-0073.md).
-// Fix: when a magic DLL unloads, the next invocation start (game thread) puts a flag of 1 back to 0, unless a battle
+// 18/10/2026: magic_0840 FUN_100012a0 writes `*[svc+0xBF0] = (svc+0x400() != 0) - 1`, i.e. -1 when exec is 0 (S); U
+// 18/10 soft-lock in the same battle after 0840 unloaded and magic_0010 loaded, D: live read flag = 0xFFFFFFFF, every
+// particle op paused, the first build (clears 1 only) left it. Every reader tests != 0, so any non-zero value is cleared.
+// Fix: when a magic DLL unloads, the next invocation start (game thread) puts a non-zero flag back to 0, unless a battle
 // script set it through pppFpStopStatus FUN_00810ef0 after that unload (its own value is kept).
 #include "../x2.h"
 
@@ -53,15 +56,16 @@ static void pre() {
             log_line("X2-MAG-031: setter hook failed - a script-set flag is not told apart (cleared too)");
     }
     if (!InterlockedExchange(&g_pending, 0)) return;
-    if (*g_flag != 1 || g_script_set) return;
+    int32_t v = *g_flag;
+    if (v == 0 || g_script_set) return;
     *g_flag = 0;
     if (InterlockedIncrement(&g_cleared) <= 20)
-        log_line("X2-MAG-031: particle pause flag left at 1 by an unloaded magic DLL - cleared (%ld so far)", g_cleared);
+        log_line("X2-MAG-031: particle pause flag left at %d by an unloaded magic DLL - cleared (%ld so far)", v, g_cleared);
 }
 
 Row row_MAG031 = {
     "X2-MAG-031",
-    "particle pause flag left at 1 by a magic DLL's last render-only draw is cleared after its unload (battle soft-lock)",
+    "particle pause flag left set (1 or -1) by a magic DLL's last render-only draw is cleared after its unload (battle soft-lock)",
     1, install, pre, nullptr, 0
 };
 
