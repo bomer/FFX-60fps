@@ -10,6 +10,8 @@
 // Evidence: outer repo re/ledger/PORT-B.md §2 (S).
 #include "../x2.h"
 #include <intrin.h>
+#include <stdlib.h>
+#include <string.h>
 
 namespace x2 {
 
@@ -221,6 +223,36 @@ static int __cdecl h_field_step(void* prog, uint32_t flags) {
 // Full Throttle's light-ball program) per invocation kind and pause value (U 17/10: glow ops never reached paused).
 static volatile LONG g_t5f[4][3];                // [kind][pause: 0 / 1 / other]
 static uint32_t g_ret5f = 0x6A5FD7 - 0x400000;   // offset; compared against the live return address
+// X2-MAG-006-UNPAUSE-LIST (default "681"): magic DLLs whose own particle steps run UNPAUSED on render-only invocations
+// (the F11 test, per DLL). U 17/10/2026: Full Throttle (magic_0681) light-ball glow blinks with paused steps and not
+// with F11; the exact paused-step gate is not mapped (re/ledger/LENS-GLOW.md). Cost: that DLL's particle programs step
+// on every invocation (up to 2x their animation rate).
+enum { MAXUL = 16, MAXULD = 8 };
+static int      g_ul_num[MAXUL];
+static int      g_ul_n = 0;
+static struct { uint8_t* base; uint32_t size; } g_ul_mod[MAXULD];
+static bool unpause_listed(const void* ret) {
+    for (int i = 0; i < MAXULD; i++)
+        if (g_ul_mod[i].base && (const uint8_t*)ret >= g_ul_mod[i].base && (const uint8_t*)ret < g_ul_mod[i].base + g_ul_mod[i].size)
+            return true;
+    return false;
+}
+static void ul_load(uint8_t* base, uint32_t size, const char* name) {
+    const char* p = strstr(name, "magic_");
+    int n = p ? atoi(p + 6) : -1;
+    for (int i = 0; i < g_ul_n; i++)
+        if (g_ul_num[i] == n)
+            for (int k = 0; k < MAXULD; k++)
+                if (!g_ul_mod[k].base) {
+                    g_ul_mod[k].size = size; g_ul_mod[k].base = base;
+                    log_line("X2-MAG-006-UNPAUSE-LIST: %s particle steps unpaused on render-only invocations", name);
+                    return;
+                }
+}
+static void ul_unload(uint8_t* base) {
+    for (int k = 0; k < MAXULD; k++) if (g_ul_mod[k].base == base) g_ul_mod[k].base = nullptr;
+}
+
 static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
     if (!row_MAG006.on || g_disabled || g_pausing) return g_tramp(prog, flags);
     void* ret = _ReturnAddress();
@@ -233,7 +265,7 @@ static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
         if (exe && render_only()) InterlockedIncrement(&g_exe_calls);
         return step_deferred(prog, flags, *g_pause != 0);
     }
-    if (g_unpause_test) {
+    if (g_unpause_test || unpause_listed(ret)) {
         InterlockedIncrement(&g_unpaused_calls);
         int32_t saved = *g_pause;
         *g_pause = 0;
@@ -287,6 +319,16 @@ static bool install() {
     g_override = (override_t)ov;
     g_fresh_on = config_row("X2-MAG-006-FRESH", 1);
     g_fresh2 = config_row("X2-MAG-006-FRESH2", 1);
+    {
+        char buf[128];
+        config_str("rows", "X2-MAG-006-UNPAUSE-LIST", buf, sizeof(buf), "681");
+        for (char* t = buf; *t && g_ul_n < MAXUL;) {
+            char* e = nullptr; long v = strtol(t, &e, 10);
+            if (e == t) { t++; continue; }
+            g_ul_num[g_ul_n++] = (int)v; t = e;
+        }
+        if (g_ul_n && !magic_mods_subscribe("X2-MAG-006-UNPAUSE-LIST", ul_load, ul_unload)) g_ul_n = 0;
+    }
     g_loopdefer = config_row("X2-FX-010-LOOPDEFER", 1);
     if (g_loopdefer) {
         // group loop tails: MOV EAX,[ESI+0xC]; CMP EAX,[ECX+0x1C]; JL; MOV EAX,[ECX+0x18]; PUSH ESI; MOV [ESI+0xC],EAX; CALL
