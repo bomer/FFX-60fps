@@ -3,7 +3,8 @@
 // for FMVs. For effects whose 60 Hz blink is not mapped yet. U 17/10/2026: Full Throttle (magic_0681) sword and fire blink
 // at 60 Hz only, and with every effect row off (F7, F8, F11, ini tests A/B/C); the cause sits in the core 60 Hz cadence
 // (re/ledger/CRASH-0681.md). The effect then plays exactly as at stock; 60 Hz returns at its unload.
-// ini [rows]: X2-MAG-STOCK=1, X2-MAG-STOCK-LIST=<magic numbers, any separator> (default "0681"; empty = none).
+// U 17/10/2026: Full Throttle fixed at 60 Hz (swords X2-CHR-001, flash X2-FX-012), so the default list is empty now.
+// ini [rows]: X2-MAG-STOCK=1, X2-MAG-STOCK-LIST=<magic numbers, any separator> (default ""; empty = none).
 #include "../x2.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +50,7 @@ static void pre() {
 
 static bool install() {
     char buf[256];
-    config_str("rows", "X2-MAG-STOCK-LIST", buf, sizeof(buf), "0681");
+    config_str("rows", "X2-MAG-STOCK-LIST", buf, sizeof(buf), "");
     for (char* t = buf; *t && g_nlist < MAX_LIST;) {
         char* e = nullptr;
         long v = strtol(t, &e, 10);
@@ -67,7 +68,7 @@ static bool install() {
 
 Row row_MAGSTOCK = {
     "X2-MAG-STOCK",
-    "fallback: stock 30 Hz pacing while a listed magic DLL is loaded (Full Throttle magic_0681)",
+    "fallback: stock 30 Hz pacing while a listed magic DLL is loaded (X2-MAG-STOCK-LIST, default none)",
     1, install, pre, nullptr, 0
 };
 
