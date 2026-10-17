@@ -17,6 +17,7 @@
 //   invocation re-writes the request (a9d4 is zeroed at 0x790EF2 after the call), and the field branch starts the same
 //   battle. If no battle starts within 60 invocations, the original FUN_00861160 runs with the saved arguments.
 #include "../fps60.h"
+#include <stdio.h>
 #include <string.h>
 
 typedef void(__cdecl* setup_t)(uint32_t mode, int area, int group, int form);
@@ -95,32 +96,71 @@ static int g_style = 0;                             // QOL-RETRY-STYLE: 0 field 
 // every range that differs from the fresh copy and equals the end copy, i.e. state carried over from the lost attempt.
 static int g_diff = 0;
 static int g_diff_phase = 0;                        // 1 wait fresh state 1, 2 wait prompt, 3 wait retry setup, 4 wait retry state 1
-static uint8_t *g_dat = nullptr, *g_dat_fresh = nullptr, *g_dat_end = nullptr;
-static uint32_t g_dat_len = 0;
+// Watched regions: [0] FFX.exe's largest writable section (.data with bss); [1] the heap allocation that holds the
+// battle file buffer DAT_0112a9a8 (outside .data, D 18/10/2026 03:09:52), found at the fresh copy.
+struct DiffRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* end; };
+static DiffRgn g_rgn[2];
+enum { HEAP_MAX = 0x3000000 };
+
+static uint8_t* diff_buf(uint32_t len) { return (uint8_t*)VirtualAlloc(nullptr, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); }
+static void diff_free(DiffRgn& r) {
+    if (r.fresh) VirtualFree(r.fresh, 0, MEM_RELEASE);
+    if (r.end) VirtualFree(r.end, 0, MEM_RELEASE);
+    memset(&r, 0, sizeof(r));
+}
 
 static bool diff_alloc() {
-    if (g_dat_fresh) return true;
+    DiffRgn& d = g_rgn[0];
+    if (d.fresh) return true;
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)exe_base();
     IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(exe_base() + dos->e_lfanew);
     IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {   // the largest writable section (.data with bss)
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
         if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
         uint32_t len = sec[i].Misc.VirtualSize & ~3u;
-        if (len > g_dat_len) { g_dat = exe_base() + sec[i].VirtualAddress; g_dat_len = len; }
+        if (len > d.len) { d.p = exe_base() + sec[i].VirtualAddress; d.len = len; }
     }
-    if (!g_dat_len) return false;
-    g_dat_fresh = (uint8_t*)VirtualAlloc(nullptr, g_dat_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    g_dat_end = (uint8_t*)VirtualAlloc(nullptr, g_dat_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!g_dat_fresh || !g_dat_end) {
-        if (g_dat_fresh) VirtualFree(g_dat_fresh, 0, MEM_RELEASE);
-        if (g_dat_end) VirtualFree(g_dat_end, 0, MEM_RELEASE);
-        g_dat_fresh = g_dat_end = nullptr;
-        log_line("QOL-RETRY-DIFF: no memory for 2 x 0x%X bytes - off", g_dat_len);
+    if (!d.len) return false;
+    d.fresh = diff_buf(d.len); d.end = diff_buf(d.len);
+    if (!d.fresh || !d.end) {
+        log_line("QOL-RETRY-DIFF: no memory for 2 x 0x%X bytes - off", d.len);
+        diff_free(d);
         g_diff = 0;
         return false;
     }
-    log_line("QOL-RETRY-DIFF: watching gva 0x%08X..0x%08X", rt_to_gva_exe(g_dat), rt_to_gva_exe(g_dat) + g_dat_len);
+    log_line("QOL-RETRY-DIFF: watching gva 0x%08X..0x%08X", rt_to_gva_exe(d.p), rt_to_gva_exe(d.p) + d.len);
     return true;
+}
+
+// The committed span of the allocation holding the battle file buffer (all regions with its AllocationBase).
+static void diff_heap_find() {
+    DiffRgn& h = g_rgn[1];
+    diff_free(h);
+    uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);   // DAT_0112a9a8: battle file buffer (MsBattleSetupEncounter)
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!file || !VirtualQuery(file, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) {
+        log_line("QOL-RETRY-DIFF: battle file buffer %p not committed - heap not watched", file);
+        return;
+    }
+    uint8_t* base = (uint8_t*)mbi.AllocationBase;
+    uint8_t* q = base;
+    uint8_t* lo = nullptr; uint8_t* hi = nullptr;
+    while (VirtualQuery(q, &mbi, sizeof(mbi)) && mbi.AllocationBase == base) {
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+            if (!lo) lo = (uint8_t*)mbi.BaseAddress;
+            hi = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+        } else if (lo) break;
+        q = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+    }
+    if (!lo || file < lo || file >= hi) { log_line("QOL-RETRY-DIFF: battle file buffer %p: no readable span", file); return; }
+    if ((uint32_t)(hi - lo) > HEAP_MAX) {                  // keep a window around the file
+        uint8_t* s = file - HEAP_MAX / 4 < lo ? lo : file - HEAP_MAX / 4;
+        lo = s; if (hi - lo > HEAP_MAX) hi = lo + HEAP_MAX;
+    }
+    h.p = lo; h.len = (uint32_t)(hi - lo) & ~3u;
+    h.fresh = diff_buf(h.len); h.end = diff_buf(h.len);
+    if (!h.fresh || !h.end) { log_line("QOL-RETRY-DIFF: no memory for the heap span 0x%X", h.len); diff_free(h); return; }
+    log_line("QOL-RETRY-DIFF: battle file buffer %p in allocation %p; watching %p..%p (0x%X bytes)", file, base, lo, hi, h.len);
 }
 
 static void hex16(char* out, const uint8_t* p, uint32_t n) {
@@ -130,50 +170,74 @@ static void hex16(char* out, const uint8_t* p, uint32_t n) {
     out[n ? n * 3 - 1 : 0] = 0;
 }
 
+// Every carried range goes to fps60_retrydiff.txt next to FFX.exe; the log gets the totals and the first 40 per region.
 static void diff_report() {
-    const uint32_t* cur = (const uint32_t*)g_dat;
-    const uint32_t* fr = (const uint32_t*)g_dat_fresh;
-    const uint32_t* en = (const uint32_t*)g_dat_end;
-    uint32_t n = g_dat_len / 4, changed = 0, carried = 0, ranges = 0, logged = 0;
-    uint32_t start = 0, last = 0;
-    bool open = false;
-    auto flush = [&]() {
-        ranges++;
-        if (logged >= 300) return;
-        logged++;
-        uint32_t off = start * 4, len = (last - start + 1) * 4;
-        char a[64], b[64];
-        hex16(a, g_dat_fresh + off, len); hex16(b, g_dat + off, len);
-        log_line("QOL-RETRY-DIFF: carried gva 0x%08X len 0x%X fresh [%s] retry [%s]", rt_to_gva_exe(g_dat + off), len, a, b);
-    };
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t c = cur[i];
-        if (c == fr[i]) continue;
-        changed++;
-        if (c != en[i]) continue;
-        carried++;
-        if (open && i - last <= 4) { last = i; continue; }
+    char path[MAX_PATH];
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    char* sl = strrchr(path, '\\');
+    if (sl) strcpy(sl + 1, "fps60_retrydiff.txt");
+    FILE* f = fopen(path, "w");
+    uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);
+    if (f) fprintf(f, "QOL-RETRY-DIFF: retry state 1 vs fresh state 1, ranges equal to the end of the lost attempt\n"
+                      "battle file buffer now %p\n", file);
+    for (int k = 0; k < 2; k++) {
+        DiffRgn& r = g_rgn[k];
+        if (!r.fresh) continue;
+        const uint32_t* cur = (const uint32_t*)r.p;
+        const uint32_t* fr = (const uint32_t*)r.fresh;
+        const uint32_t* en = (const uint32_t*)r.end;
+        uint32_t n = r.len / 4, changed = 0, carried = 0, ranges = 0, logged = 0;
+        uint32_t start = 0, last = 0;
+        bool open = false;
+        auto flush = [&]() {
+            ranges++;
+            uint32_t off = start * 4, len = (last - start + 1) * 4;
+            char a[64], b[64];
+            hex16(a, r.fresh + off, len); hex16(b, r.p + off, len);
+            uint32_t addr = k == 0 ? rt_to_gva_exe(r.p + off) : (uint32_t)(uintptr_t)(r.p + off);
+            if (f) fprintf(f, "%s 0x%08X len 0x%X fresh [%s] retry [%s]\n", k == 0 ? "gva" : "heap", addr, len, a, b);
+            if (logged < 40) {
+                logged++;
+                log_line("QOL-RETRY-DIFF: carried %s 0x%08X len 0x%X fresh [%s] retry [%s]", k == 0 ? "gva" : "heap", addr,
+                         len, a, b);
+            }
+        };
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t c = cur[i];
+            if (c == fr[i]) continue;
+            changed++;
+            if (c != en[i]) continue;
+            carried++;
+            if (open && i - last <= 4) { last = i; continue; }
+            if (open) flush();
+            start = last = i; open = true;
+        }
         if (open) flush();
-        start = last = i; open = true;
+        log_line("QOL-RETRY-DIFF: %s: %u dwords differ, %u carried from the lost attempt in %u ranges",
+                 k == 0 ? ".data" : "heap", changed, carried, ranges);
+        if (f) fprintf(f, "%s: %u dwords differ, %u carried in %u ranges\n", k == 0 ? ".data" : "heap", changed, carried, ranges);
     }
-    if (open) flush();
-    log_line("QOL-RETRY-DIFF: retry state 1 vs fresh state 1: %u dwords differ, %u carried from the lost attempt in %u ranges "
-             "(%u logged)", changed, carried, ranges, logged);
-    uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);   // DAT_0112a9a8: battle file buffer (MsBattleSetupEncounter)
-    log_line("QOL-RETRY-DIFF: battle file buffer %p (%s the watched section)", file,
-             file >= g_dat && file < g_dat + g_dat_len ? "inside" : "outside");
+    if (f) fclose(f);
+    log_line("QOL-RETRY-DIFF: battle file buffer now %p; all ranges in %s", file, path);
+}
+
+static void diff_copy(bool fresh) {
+    for (int k = 0; k < 2; k++)
+        if (g_rgn[k].fresh) memcpy(fresh ? g_rgn[k].fresh : g_rgn[k].end, g_rgn[k].p, g_rgn[k].len);
 }
 
 static void diff_step() {                           // from pre(), each invocation
     if (!g_diff) return;
     uint8_t st = *g_a8e0;
     if (g_diff_phase == 1 && st == 1) {
-        memcpy(g_dat_fresh, g_dat, g_dat_len);
+        diff_heap_find();
+        diff_copy(true);
         g_diff_phase = 2;
         log_line("QOL-RETRY-DIFF: fresh copy at state 1");
     } else if (g_diff_phase == 4 && st == 1) {
-        diff_report();
         g_diff_phase = 0;
+        __try { diff_report(); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: fault in the report (heap span freed?)"); }
     }
 }
 
@@ -329,7 +393,7 @@ static void pre() {
                 g_state = ST_PROMPT;
                 log_line("QOL-RETRY: game over (state 0x%02X): Retry / Give up prompt open", st);
                 if (g_diff && g_diff_phase == 2) {
-                    memcpy(g_dat_end, g_dat, g_dat_len);
+                    diff_copy(false);
                     g_diff_phase = 3;
                     log_line("QOL-RETRY-DIFF: end copy at the prompt");
                 }
