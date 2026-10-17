@@ -22,6 +22,8 @@ static override_t g_override = nullptr;
 static volatile int32_t* g_pause = nullptr;
 static bool       g_patched = false;
 static int        g_fresh_on = 1;                // [rows] X2-MAG-006-FRESH
+static int        g_fresh2 = 1;                  // [rows] X2-MAG-006-FRESH2
+static volatile LONG g_fresh2_calls = 0;
 static int        g_pausing = 0;                 // game thread: this row is inside a paused step
 static volatile LONG g_paused_calls = 0, g_exe_calls = 0, g_fresh_calls = 0, g_override_skipped = 0;
 extern Row row_MAG006;
@@ -231,6 +233,18 @@ static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
         *g_pause = saved;
         return r;
     }
+    // X2-MAG-006-FRESH2 (default 1): a program re-initialised by its DLL (+0xB08 FUN_007ff070 resets +8 and +0x78, not
+    // +0xC) is fresh too; its first step runs with the pause flag CLEAR (the DLL may have written -1 itself), so its
+    // emitters spawn. magic_0681 (Full Throttle) re-inits its light-ball program after every finished live step; the
+    // paused render-only first step left the glow groups empty = blink (U 17/10/2026; F11 fixed it; LENS-GLOW.md §2).
+    if (g_fresh2 && *(int32_t*)((uint8_t*)prog + 8) == 0 && *(int32_t*)((uint8_t*)prog + 0x78) == 0) {
+        InterlockedIncrement(&g_fresh2_calls);
+        int32_t saved = *g_pause;
+        *g_pause = 0;
+        int r = step_deferred(prog, flags, false);
+        *g_pause = saved;
+        return r;
+    }
     if (g_fresh_on && *(int32_t*)((uint8_t*)prog + 8) == 0 && *(int32_t*)((uint8_t*)prog + 0xC) == 0) {
         InterlockedIncrement(&g_fresh_calls);
         return step_deferred(prog, flags, *g_pause != 0);
@@ -264,6 +278,7 @@ static bool install() {
     if (!ov || !in_image(ov)) return false;
     g_override = (override_t)ov;
     g_fresh_on = config_row("X2-MAG-006-FRESH", 1);
+    g_fresh2 = config_row("X2-MAG-006-FRESH2", 1);
     g_loopdefer = config_row("X2-FX-010-LOOPDEFER", 1);
     if (g_loopdefer) {
         // group loop tails: MOV EAX,[ESI+0xC]; CMP EAX,[ECX+0x1C]; JL; MOV EAX,[ECX+0x18]; PUSH ESI; MOV [ESI+0xC],EAX; CALL
@@ -403,8 +418,8 @@ static void post() {
     if (g_freedefer && now - last_fq >= 10000 && g_fq_total != last_fq_total) {
         last_fq = now;
         last_fq_total = g_fq_total;
-        log_line("X2-FX-011-FREEDEFER: deferred %ld freed %ld dropped %ld one-shot ends %ld (queued now %d)", g_fq_total, g_fq_freed,
-                 g_fq_dropped, g_fq_ends, g_nfq);
+        log_line("X2-FX-011-FREEDEFER: deferred %ld freed %ld dropped %ld one-shot ends %ld (queued now %d); FRESH2 unpaused first steps %ld",
+                 g_fq_total, g_fq_freed, g_fq_dropped, g_fq_ends, g_nfq, g_fresh2_calls);
     }
     static LONG ov_seen = 0;
     if (g_override_skipped && !ov_seen) {
