@@ -362,43 +362,78 @@ static void diff_workers(const char* why) {         // the context pointer is re
 // Yunalesca's chr object (D 03:46: field worker 10, chr id 0x1082, +0x9C = 0FB3C650 at every point; the battle reuses
 // it, so the form-2 swap lives in it): the first 12 KB of each field-worker monster chr are copied at the fresh state 1
 // and every changed dword is logged at the prompt and the retry's state 1.
-enum { CHR_SNAP = 0x3000, CHR_MAX = 4 };
-static uint8_t* g_chr_p[CHR_MAX];
-static uint8_t  g_chr_fresh[CHR_MAX][CHR_SNAP];
-static int      g_chr_n = 0;
+struct ObjRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* ok; const char* what; };
+enum { OBJ_MAX = 8 };
+static ObjRgn g_obj[OBJ_MAX];
+static int    g_obj_n = 0;
 
+static void obj_add(uint8_t* p, uint32_t len, const char* what) {
+    if (!p || g_obj_n >= OBJ_MAX) return;
+    ObjRgn& r = g_obj[g_obj_n];
+    if (!r.fresh || r.len < len) {
+        if (r.fresh) VirtualFree(r.fresh, 0, MEM_RELEASE);
+        if (r.ok) VirtualFree(r.ok, 0, MEM_RELEASE);
+        r.fresh = diff_buf(len); r.ok = diff_buf(len / 0x1000 + 1);
+        if (!r.fresh || !r.ok) return;
+    }
+    r.p = p; r.len = len; r.what = what;
+    for (uint32_t o = 0; o < len; o += 0x1000)
+        r.ok[o >> 12] = page_readable(p + o) && copy_page(r.fresh + o, p + o, 0x1000);
+    g_obj_n++;
+}
+
+// Yunalesca's chr: the first 12 KB matched the fresh copy at the retry's state 1 except motion counters (D 03:48), so
+// the form is held further in or in shared data: per monster field worker the chr (+0x9C, 32 KB) and +0xA4 (16 KB),
+// per monster chr cache entry its data (+0xC, 64 KB) and object (+0x10, 16 KB).
 static void chr_snap_take() {
     uint8_t* eb = exe_base();
+    g_obj_n = 0;
+    __try {
+        uint32_t** tbl = (uint32_t**)(eb + (0x01302F98 - 0x400000));
+        for (int i = 0; i < 100; i++) {
+            uint32_t* e = tbl[i];
+            if (!e || !e[3] || (e[0] & 0xF000) != 0x1000 || (uint8_t)e[1] != 1) continue;
+            obj_add((uint8_t*)(uintptr_t)e[3], 0x10000, "cache data");
+            obj_add((uint8_t*)(uintptr_t)e[4], 0x4000, "cache obj");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
     uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
     uint8_t* saved = *ctx;
     *ctx = eb + (0x01325BA0 - 0x400000);
-    g_chr_n = 0;
     __try {
         int n = *(eb + (0x01325BAC - 0x400000));
-        for (int i = 0; i < n && g_chr_n < CHR_MAX; i++) {
+        for (int i = 0; i < n; i++) {
             uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
             if (!w || (*(uint16_t*)(w + 0xA8) & 0xF000) != 0x1000) continue;
-            uint8_t* c = *(uint8_t**)(w + 0x9C);
-            if (!c || !copy_page(g_chr_fresh[g_chr_n], c, CHR_SNAP)) continue;
-            g_chr_p[g_chr_n++] = c;
+            obj_add(*(uint8_t**)(w + 0x9C), 0x8000, "worker chr");
+            obj_add(*(uint8_t**)(w + 0xA4), 0x4000, "worker +A4");
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     *ctx = saved;
+    for (int k = 0; k < g_obj_n; k++) log_line("QOL-RETRY-DIFF: object %s %p +0x%X copied", g_obj[k].what, g_obj[k].p, g_obj[k].len);
 }
 
+static bool looks_float(uint32_t v) { uint32_t e = (v >> 23) & 0xFF; return v && e > 0x60 && e < 0x9F; }
+
 static void chr_snap_diff(const char* why) {
-    static uint8_t cur[CHR_SNAP];
-    for (int k = 0; k < g_chr_n; k++) {
-        if (!copy_page(cur, g_chr_p[k], CHR_SNAP)) { log_line("QOL-RETRY-DIFF: chr %p unreadable at %s", g_chr_p[k], why); continue; }
-        int logged = 0, changed = 0;
-        for (int o = 0; o < CHR_SNAP; o += 4) {
-            uint32_t a = *(uint32_t*)(g_chr_fresh[k] + o), b = *(uint32_t*)(cur + o);
-            if (a == b) continue;
-            changed++;
-            if (logged++ < 250) log_line("QOL-RETRY-DIFF: chr %p %s +%04X fresh %08X now %08X", g_chr_p[k], why, o, a, b);
+    static uint8_t cur[0x1000];
+    for (int k = 0; k < g_obj_n; k++) {
+        ObjRgn& r = g_obj[k];
+        int logged = 0, changed = 0, ints = 0;
+        for (uint32_t o = 0; o < r.len; o += 0x1000) {
+            if (!r.ok[o >> 12] || !page_readable(r.p + o) || !copy_page(cur, r.p + o, 0x1000)) continue;
+            for (uint32_t i = 0; i < 0x1000; i += 4) {
+                uint32_t a = *(uint32_t*)(r.fresh + o + i), b = *(uint32_t*)(cur + i);
+                if (a == b) continue;
+                changed++;
+                if (looks_float(a) && looks_float(b)) continue;
+                ints++;
+                if (logged++ < 150)
+                    log_line("QOL-RETRY-DIFF: %s %p %s +%05X fresh %08X now %08X", r.what, r.p, why, o + i, a, b);
+            }
         }
-        log_line("QOL-RETRY-DIFF: chr %p %s: %d dwords changed since the fresh state 1", g_chr_p[k], why, changed);
+        log_line("QOL-RETRY-DIFF: %s %p %s: %d dwords changed, %d not float", r.what, r.p, why, changed, ints);
     }
 }
 
