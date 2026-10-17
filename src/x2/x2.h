@@ -106,6 +106,7 @@ bool     mag006_pause_exe_caller(uint8_t* ret);  // X2-MAG-006 pauses this EXE c
 typedef void (*step_note_fn)(void* prog, int cls, int parts_before, int parts_after, int ret);
 void*    mag006_cur_step(int* cls);               // program of the running particle step (cls 1 DLL, 2 EXE, 3 field)
 void     mag006_set_step_note(step_note_fn fn);   // diagnostics: called after each Ppp_ProgramStep
+bool     pppops_prog_marked(void* prog);          // X2-MAG-006-UNPAUSE-OPS test (X2-DIAG-PPPOPS)
 void     mag026_draw_record(uint8_t* head, uint8_t* nd, void* cb);   // X2-MAG-020 draw-only walk -> X2-MAG-026
 
 // Rollback: a span is snapshotted at the start of every render-only invocation and written back at its end.

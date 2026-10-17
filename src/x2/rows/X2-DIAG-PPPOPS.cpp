@@ -129,6 +129,31 @@ static void step_trace(void* prog, int cls, int before, int after, int ret, cons
              before, after, before - t->last, ret, buf);
     t->last = after;
 }
+// X2-MAG-006-UNPAUSE-OPS (test, default ""): programs whose last step called one of these ops are marked; X2-MAG-006 then
+// steps them unpaused on render-only invocations (F11 for those programs only). Which program blinks (U 17/10/2026:
+// Full Throttle later-phase glow; the only glow ops then are pppKeLnsLp / pppKeLnsArnd).
+static bool  g_mark_op[MAXOPS];
+static bool  g_mark_any = false;
+enum { HMK = 512 };
+static void* g_marked[HMK];
+static void mark_prog(void* prog) {
+    uint32_t h = hmix((uint32_t)(uintptr_t)prog);
+    for (int k = 0; k < 32; k++) {
+        void*& e = g_marked[(h + k) & (HMK - 1)];
+        if (e == prog) return;
+        if (!e) { e = prog; return; }
+    }
+}
+bool pppops_prog_marked(void* prog) {
+    if (!g_mark_any) return false;
+    uint32_t h = hmix((uint32_t)(uintptr_t)prog);
+    for (int k = 0; k < 32; k++) {
+        void* e = g_marked[(h + k) & (HMK - 1)];
+        if (e == prog) return true;
+        if (!e) return false;
+    }
+    return false;
+}
 static void step_note(void* prog, int cls, int before, int after, int ret) {
     if (after < 0) {
         if (g_depth < 4) for (int i = 0; i < g_n; i++) g_snap[g_depth][i] = g_paused[i] + g_live[i];
@@ -136,7 +161,12 @@ static void step_note(void* prog, int cls, int before, int after, int ret) {
         return;
     }
     g_depth--;
-    if (g_depth >= 0 && g_depth < 4) step_trace(prog, cls, before, after, ret, g_snap[g_depth]);
+    if (g_depth >= 0 && g_depth < 4) {
+        if (g_mark_any && cls == 1)
+            for (int i = 0; i < g_n; i++)
+                if (g_mark_op[i] && g_paused[i] + g_live[i] != g_snap[g_depth][i]) { mark_prog(prog); break; }
+        step_trace(prog, cls, before, after, ret, g_snap[g_depth]);
+    }
     if (g_depth < 0) g_depth = 0;
     StC* e = st_slot(prog, cls);
     if (!e) return;
@@ -251,6 +281,14 @@ static bool install() {
             size_t L = strlen(g_name[i]);
             while (hit && ((hit > tq && hit[-1] != ' ' && hit[-1] != ',') || (hit[L] && hit[L] != ' ' && hit[L] != ','))) hit = strstr(hit + 1, g_name[i]);
             g_tr_op[i] = hit != nullptr;
+        }
+        config_str("rows", "X2-MAG-006-UNPAUSE-OPS", tq, sizeof(tq), "");
+        for (int i = 0; i < g_n; i++) {
+            const char* hit = strstr(tq, g_name[i]);
+            size_t L = strlen(g_name[i]);
+            while (hit && ((hit > tq && hit[-1] != ' ' && hit[-1] != ',') || (hit[L] && hit[L] != ' ' && hit[L] != ','))) hit = strstr(hit + 1, g_name[i]);
+            g_mark_op[i] = hit != nullptr;
+            if (hit) { g_mark_any = true; log_line("  X2-MAG-006-UNPAUSE-OPS: programs calling %s step unpaused on render-only", g_name[i]); }
         }
     }
     char tr[256];

@@ -294,7 +294,7 @@ static int ppp_step_body(void* prog, uint32_t flags, void* ret) {
         if (exe && render_only()) InterlockedIncrement(&g_exe_calls);
         return step_deferred(prog, flags, *g_pause != 0);
     }
-    if (g_unpause_test || unpause_listed(ret)) {
+    if (g_unpause_test || unpause_listed(ret) || pppops_prog_marked(prog)) {
         InterlockedIncrement(&g_unpaused_calls);
         int32_t saved = *g_pause;
         *g_pause = 0;
@@ -482,6 +482,13 @@ static void post() {
         reported = 1;
         log_line("X2-MAG-006: first paused DLL particle step on a render-only invocation (EXE callers passed %ld, fresh %ld)",
                  g_exe_calls, g_fresh_calls);
+    }
+    static DWORD last_un = 0;
+    static LONG last_un_n = 0;
+    if (GetTickCount() - last_un >= 10000 && g_unpaused_calls != last_un_n) {
+        last_un = GetTickCount();
+        last_un_n = g_unpaused_calls;
+        log_line("X2-MAG-006: render-only DLL steps run unpaused so far %ld (F11 / UNPAUSE-LIST / UNPAUSE-OPS)", g_unpaused_calls);
     }
     static DWORD last_def = 0;
     static LONG last_total = 0;
