@@ -110,7 +110,7 @@ static void deferred_flush(void* prog, bool drop) {
 // program's next UNPAUSED step (its ops then run on them, the stock order). A paused step keeps them queued: EXE-called
 // programs (field particles, e.g. the pyrefly river) also run paused on render-only frames whenever a magic DLL left the
 // pause flag set (magic_0718's draw entry writes it per draw; U 16/10/2026: river blinks ~1/s on the mission screen).
-// X2-FX-011-FREEDEFER (default 1; U 17/10/2026: Full Throttle light-ball glow blinks, F11 fixes it; re/ledger/LENS-GLOW.md).
+// X2-FX-011-FREEDEFER (default 0: did not help the glow, U 17/10; U 17/10/2026: Full Throttle light-ball glow blinks, F11 fixes it; re/ledger/LENS-GLOW.md).
 // The end-of-step tail of the group loops (unpaused steps only, gate 0x80605D) frees a particle whose age +0xC reached
 // its life (0x806118 / twin 0x806556: `push 0; push esi; mov [edx],edi; call FUN_00804b80`). Particles that live one
 // tick are emitted, drawn and freed inside one unpaused step, so the paused render-only step that follows has nothing
@@ -223,7 +223,7 @@ static int __cdecl h_field_step(void* prog, uint32_t flags) {
 // Full Throttle's light-ball program) per invocation kind and pause value (U 17/10: glow ops never reached paused).
 static volatile LONG g_t5f[4][3];                // [kind][pause: 0 / 1 / other]
 static uint32_t g_ret5f = 0x6A5FD7 - 0x400000;   // offset; compared against the live return address
-// X2-MAG-006-UNPAUSE-LIST (default "681"): magic DLLs whose own particle steps run UNPAUSED on render-only invocations
+// X2-MAG-006-UNPAUSE-LIST (default "" = off; U 17/10: "681" stopped the blink but the effect looked skipped): magic DLLs whose own particle steps run UNPAUSED on render-only invocations
 // (the F11 test, per DLL). U 17/10/2026: Full Throttle (magic_0681) light-ball glow blinks with paused steps and not
 // with F11; the exact paused-step gate is not mapped (re/ledger/LENS-GLOW.md). Cost: that DLL's particle programs step
 // on every invocation (up to 2x their animation rate).
@@ -273,7 +273,7 @@ static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
         *g_pause = saved;
         return r;
     }
-    // X2-MAG-006-FRESH2 (default 1): a program re-initialised by its DLL (+0xB08 FUN_007ff070 resets +8 and +0x78, not
+    // X2-MAG-006-FRESH2 (default 0: fired once in Full Throttle, did not help, U 17/10): a program re-initialised by its DLL (+0xB08 FUN_007ff070 resets +8 and +0x78, not
     // +0xC) is fresh too; its first step runs with the pause flag CLEAR (the DLL may have written -1 itself), so its
     // emitters spawn. magic_0681 (Full Throttle) re-inits its light-ball program after every finished live step; the
     // paused render-only first step left the glow groups empty = blink (U 17/10/2026; F11 fixed it; LENS-GLOW.md §2).
@@ -318,10 +318,10 @@ static bool install() {
     if (!ov || !in_image(ov)) return false;
     g_override = (override_t)ov;
     g_fresh_on = config_row("X2-MAG-006-FRESH", 1);
-    g_fresh2 = config_row("X2-MAG-006-FRESH2", 1);
+    g_fresh2 = config_row("X2-MAG-006-FRESH2", 0);
     {
         char buf[128];
-        config_str("rows", "X2-MAG-006-UNPAUSE-LIST", buf, sizeof(buf), "681");
+        config_str("rows", "X2-MAG-006-UNPAUSE-LIST", buf, sizeof(buf), "");
         for (char* t = buf; *t && g_ul_n < MAXUL;) {
             char* e = nullptr; long v = strtol(t, &e, 10);
             if (e == t) { t++; continue; }
@@ -355,7 +355,7 @@ static bool install() {
                      rt_to_gva(ta), rt_to_gva(g_restart_site[0]), rt_to_gva(g_restart_site[1]));
         }
     }
-    g_freedefer = g_loopdefer ? config_row("X2-FX-011-FREEDEFER", 1) : 0;   // needs LOOPDEFER's tracked steps
+    g_freedefer = g_loopdefer ? config_row("X2-FX-011-FREEDEFER", 0) : 0;   // needs LOOPDEFER's tracked steps
     if (g_freedefer) {
         // tail free blocks: MOV EAX,[ECX+0x14]; OR EBX,EAX; CMP [ESI+0xC],EAX; JB keep; PUSH 0; PUSH ESI; MOV [EDX],EDI;
         // CALL free; MOV EDX,[EBP-0x20]; ADD ESP,8; JMP after
