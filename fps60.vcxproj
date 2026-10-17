@@ -147,6 +147,7 @@
     <ClCompile Include="src\x\rows\UI-BTLL1.cpp" />
     <ClCompile Include="src\x\rows\DEV-STOCK.cpp" />
     <ClCompile Include="src\x\rows\DEV-TURBO.cpp" />
+    <ClCompile Include="src\x\rows\DEV-DMG.cpp" />
     <ClCompile Include="src\x\rows\FX-010.cpp" />
     <ClCompile Include="src\x\rows\DIAG-HANGDUMP.cpp" />
     <ClCompile Include="src\x\rows\DIAG-BTLSIG.cpp" />
