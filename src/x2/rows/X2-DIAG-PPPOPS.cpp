@@ -224,7 +224,47 @@ static void hexs(char* o, size_t cb, const uint8_t* p, int n) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     o[k] = 0;
 }
+// Compact mode (X2-DIAG-PPPOPS-DUMP-MODE=1, default): per invocation one line per dumped op: calls, particles at age 0,
+// min / max age, and calls whose data dword at +0xA8 (KeLnsLp size) / +0x0 (KeLnsArnd texture) is 0 or the null record.
+struct Sum { LONG n, age0, amin, amax, z8f, za8, z0, z4; };
+static Sum   g_sum[2][MAXOPS];
+static int   g_dump_mode = 1;
+static uint8_t* g_null_rec = nullptr;             // 0x18E49B0, the empty texture record (FUN_00855830 test)
+static void sum_call(int i, uint8_t* part, uint8_t*, uint8_t* opd) {
+    int cls = 0;
+    uint8_t* prog = (uint8_t*)mag006_cur_step(&cls);
+    if (!prog) return;
+    char mod[64]; uint32_t off;
+    module_of(prog, mod, sizeof(mod), &off);
+    if (!strstr(mod, g_dump_mod)) return;
+    Sum& s = g_sum[render_only() ? 1 : 0][i];
+    __try {
+        uint8_t* d = part + 0xA0 + **(int**)(opd + 0xC);
+        int age = *(int*)(part + 0xC);
+        if (!s.n || age < s.amin) s.amin = age;
+        if (!s.n || age > s.amax) s.amax = age;
+        s.n++;
+        if (!age) s.age0++;
+        if (!d[0x8F]) s.z8f++;
+        if (!*(int*)(d + 0xA8)) s.za8++;
+        if (!*(void**)d || *(uint8_t**)d == g_null_rec) s.z0++;
+        if (!*(int*)(d + 4)) s.z4++;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+static void sum_flush() {
+    if (g_dump_lines >= 3000) return;
+    for (int k = 0; k < 2; k++)
+        for (int i = 0; i < g_n; i++) {
+            Sum& s = g_sum[k][i];
+            if (!s.n) continue;
+            g_dump_lines++;
+            log_line("PPPSUM #%ld %s %-12s n %ld age0 %ld age %X..%X | 8F=0 %ld A8=0 %ld d0=0/null %ld d4=0 %ld", g_inv, k ? "R" : "L",
+                     g_name[i] + 3, s.n, s.age0, s.amin, s.amax, s.z8f, s.za8, s.z0, s.z4);
+            s = Sum{};
+        }
+}
 static void dump_call(int i, uint8_t* part, uint8_t* key, uint8_t* opd) {
+    if (g_dump_mode == 1) { sum_call(i, part, key, opd); return; }
     if (g_dump_lines >= 1200) return;
     int cls = 0;
     uint8_t* prog = (uint8_t*)mag006_cur_step(&cls);
@@ -320,6 +360,8 @@ static bool install() {
         }
         config_str("rows", "X2-DIAG-PPPOPS-DUMP", tq, sizeof(tq), "");
         config_str("rows", "X2-DIAG-PPPOPS-DUMP-MOD", g_dump_mod, sizeof(g_dump_mod), "magic_0681");
+        g_dump_mode = config_row("X2-DIAG-PPPOPS-DUMP-MODE", 1);
+        g_null_rec = exe_base() + (0x18E49B0 - 0x400000);   // compared only, never dereferenced
         for (int i = 0; i < g_n; i++) {
             const char* hit = strstr(tq, g_name[i]);
             size_t L = strlen(g_name[i]);
@@ -361,6 +403,7 @@ static void pre() {
 }
 
 static void post() {
+    if (g_dump_mode == 1) sum_flush();
     g_inv++;
     static DWORD last = 0;
     DWORD now = GetTickCount();
