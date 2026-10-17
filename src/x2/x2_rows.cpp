@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_MAG019, row_MAG027, row_MAGSTOCK, row_CHR001, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DIAGFTBLINK, row_DIAGFLASH, row_DEVBISECT;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_FX012, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_MAG019, row_MAG027, row_MAGSTOCK, row_CHR001, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DIAGFTBLINK, row_DIAGFLASH, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -22,6 +22,7 @@ static Row* g_rows[] = {
     &row_CLK002,                                 // rows/X2-CLK-002.cpp
     &row_MAG006,                                 // rows/X2-MAG-006.cpp
     &row_FX010DRAWOPS,                           // rows/X2-FX-010-DRAWOPS.cpp
+    &row_FX012,                                  // rows/X2-FX-012.cpp (pppop_flash on paused steps)
     &row_UI014,                                  // rows/X2-UI-014.cpp
     &row_TEXANIM001,                             // rows/X2-TEXANIM-001.cpp
     &row_MAG016,                                 // rows/X2-MAG-016.cpp (record driver, 79 magic DLLs)
