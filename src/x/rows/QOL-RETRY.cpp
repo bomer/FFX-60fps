@@ -359,6 +359,49 @@ static void diff_workers(const char* why) {         // the context pointer is re
     *ctx = saved;
 }
 
+// Yunalesca's chr object (D 03:46: field worker 10, chr id 0x1082, +0x9C = 0FB3C650 at every point; the battle reuses
+// it, so the form-2 swap lives in it): the first 12 KB of each field-worker monster chr are copied at the fresh state 1
+// and every changed dword is logged at the prompt and the retry's state 1.
+enum { CHR_SNAP = 0x3000, CHR_MAX = 4 };
+static uint8_t* g_chr_p[CHR_MAX];
+static uint8_t  g_chr_fresh[CHR_MAX][CHR_SNAP];
+static int      g_chr_n = 0;
+
+static void chr_snap_take() {
+    uint8_t* eb = exe_base();
+    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
+    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
+    uint8_t* saved = *ctx;
+    *ctx = eb + (0x01325BA0 - 0x400000);
+    g_chr_n = 0;
+    __try {
+        int n = *(eb + (0x01325BAC - 0x400000));
+        for (int i = 0; i < n && g_chr_n < CHR_MAX; i++) {
+            uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
+            if (!w || (*(uint16_t*)(w + 0xA8) & 0xF000) != 0x1000) continue;
+            uint8_t* c = *(uint8_t**)(w + 0x9C);
+            if (!c || !copy_page(g_chr_fresh[g_chr_n], c, CHR_SNAP)) continue;
+            g_chr_p[g_chr_n++] = c;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    *ctx = saved;
+}
+
+static void chr_snap_diff(const char* why) {
+    static uint8_t cur[CHR_SNAP];
+    for (int k = 0; k < g_chr_n; k++) {
+        if (!copy_page(cur, g_chr_p[k], CHR_SNAP)) { log_line("QOL-RETRY-DIFF: chr %p unreadable at %s", g_chr_p[k], why); continue; }
+        int logged = 0, changed = 0;
+        for (int o = 0; o < CHR_SNAP; o += 4) {
+            uint32_t a = *(uint32_t*)(g_chr_fresh[k] + o), b = *(uint32_t*)(cur + o);
+            if (a == b) continue;
+            changed++;
+            if (logged++ < 250) log_line("QOL-RETRY-DIFF: chr %p %s +%04X fresh %08X now %08X", g_chr_p[k], why, o, a, b);
+        }
+        log_line("QOL-RETRY-DIFF: chr %p %s: %d dwords changed since the fresh state 1", g_chr_p[k], why, changed);
+    }
+}
+
 static void diff_chr(const char* why) {
     __try { diff_cache(why); } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: cache dump faulted"); }
     diff_workers(why);
@@ -375,6 +418,7 @@ static void diff_step_body() {
         g_diff_phase = 3;
         log_line("QOL-RETRY-DIFF: end copy at the prompt");
         diff_chr("prompt");
+        chr_snap_diff("prompt");
     } else if (g_diff_phase == 1 && st == 1) {
         diff_copy(true);
         memcpy(g_prev, g_rgn[0].p, g_rgn[0].len);
@@ -385,12 +429,14 @@ static void diff_step_body() {
         log_line("QOL-RETRY-DIFF: fresh copy at state 1");
         __try { diff_slots("fresh state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         diff_chr("fresh state 1");
+        chr_snap_take();
     } else if (g_diff_phase == 2) {
         diff_window();
     } else if (g_diff_phase == 4 && st == 1) {
         g_diff_phase = 0;
         __try { diff_slots("retry state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         diff_chr("retry state 1");
+        chr_snap_diff("retry state 1");
         g_slot_log_until = 2400;
         diff_report();
     }
