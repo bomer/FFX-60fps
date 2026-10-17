@@ -7,6 +7,7 @@
 // comparison) every invocation logs, at its end: kind, the list count, state [0], +0x338, +0x33C (max 240 lines per load).
 // H1 holds if, for 0681 only, the state clears the list each invocation and RENDER counts drop below LOGIC counts.
 #include "../x2.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,8 @@ namespace x2 {
 
 static uint8_t** g_state = nullptr;              // &DAT_00dced88 (pointer to the state block)
 static uint8_t** g_hdframe = nullptr;            // &DAT_00dcda04
+static uint8_t* volatile* g_table = nullptr;     // actor array pointer (0x01CC9604), count 0x01CC9600, stride 0x910
+static volatile int32_t*  g_acount = nullptr;
 static int  g_list[8], g_nlist = 0;
 static uint8_t* g_watch = nullptr;               // loaded watched DLL base (one at a time)
 static char  g_name[24];
@@ -38,7 +41,7 @@ static void on_unload(uint8_t* base) {
 }
 
 static void post() {
-    if (!g_active || g_lines >= 240) return;
+    if (!g_active || g_lines >= 600) return;
     int32_t cnt = -1, st = -1, b338 = -1, b33c = -1;
     __try {
         uint8_t* hf = *g_hdframe;
@@ -46,8 +49,20 @@ static void post() {
         uint8_t* s = *g_state;
         if (s) { st = *(int32_t*)s; b338 = s[0x338]; b33c = s[0x33C]; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    // loop-3 gate fields (FT-BLINK B6) of the first two sword actors (id 0x0133): +2, +0x18F, +0x1A0, +0x1A4, +0x360
+    char act[200]; int k = 0; act[0] = 0;
+    __try {
+        uint8_t* base = *g_table; int n = *g_acount, shown = 0;
+        for (int i = 0; base && i < n && i < 64 && shown < 2; i++) {
+            uint8_t* a = base + i * 0x910;
+            if (*(uint16_t*)a != 0x0133) continue;
+            k += _snprintf_s(act + k, sizeof(act) - k, _TRUNCATE, " [s%d +2=%u 18F=%02X 1A0=%08X 1A4=%08X 360=%08X]", i, a[2],
+                             a[0x18F], *(uint32_t*)(a + 0x1A0), *(uint32_t*)(a + 0x1A4), *(uint32_t*)(a + 0x360));
+            shown++;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     static const char* K[] = {"LOGIC", "RENDER", "BACKLOG", "STOCK"};
-    log_line("FTBLINK %s #%d %s list=%d state=%d b338=%d b33c=%d", g_name, g_lines, K[pacing_kind() & 3], cnt, st, b338, b33c);
+    log_line("FTBLINK %s #%d %s list=%d state=%d b338=%d b33c=%d%s", g_name, g_lines, K[pacing_kind() & 3], cnt, st, b338, b33c, act);
     g_lines++;
 }
 
@@ -66,8 +81,13 @@ static bool install() {
     g_state = (uint8_t**)abs_operand("HD state ptr", t + 1);
     g_hdframe = (uint8_t**)abs_operand("hdframe ptr", thunk + 8);
     if (!g_state || !g_hdframe) return false;
+    uint8_t* tb = sig_find("X2-DIAG-FTBLINK actor table", "8B 0D ?? ?? ?? ?? 8B 35 ?? ?? ?? ?? 69 C9 10 09 00 00 03 CE", 0x6DBAA5);
+    if (!tb) return false;
+    g_acount = (volatile int32_t*)abs_operand("actor count", tb + 2);
+    g_table = (uint8_t* volatile*)abs_operand("actor table", tb + 8);
+    if (!g_acount || !g_table) return false;
     char buf[128];
-    config_str("rows", "X2-DIAG-FTBLINK-DLL", buf, sizeof(buf), "681 80");
+    config_str("rows", "X2-DIAG-FTBLINK-DLL", buf, sizeof(buf), "681");
     for (char* p = buf; *p && g_nlist < 8;) {
         char* e = nullptr; long v = strtol(p, &e, 10);
         if (e == p) { p++; continue; }
