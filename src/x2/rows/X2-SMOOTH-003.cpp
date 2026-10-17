@@ -14,6 +14,7 @@
 #include "x2_smooth.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 namespace x2 {
 
@@ -573,8 +574,17 @@ static bool cloth_extrap(uint8_t* a, float k, bool need_prev) {
     return true;
 }
 
+static volatile LONG g_cjob_calls[MAXA];         // FREEZEDIAG: cloth job entries per slot (worker threads)
+static bool g_freezediag_on = false;
+
 static void __cdecl h_cjob(uint8_t** list, int* count) {
     bool live = !g_disabled && row_SMOOTH003.on && smooth_live(3);
+    if (g_freezediag_on) __try {
+        for (int k = 0; k < *count; k++) {
+            int i = slot_of(list[k], *g_table, *g_count);
+            if (i >= 0 && i < MAXA) InterlockedIncrement(&g_cjob_calls[i]);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (g_clothhold >= 2 && g_walked_inv && live) {
         bool all = true;
         __try {
@@ -644,6 +654,99 @@ static bool apply_patches() {
     return true;
 }
 
+// X2-SMOOTH-003-FREEZEDIAG (diagnostic, default 0): U 18/10/2026 Seymour's model holds one pose for ~0.5 s at the start
+// of Tidus's Blitz Ace (clip 00:15:34, 0.4-0.9 s), then moves again. Per invocation (at post) each active parent
+// actor's bone angles, cloth vertex arrays and root are hashed; when none of them changed for FREEZE_RUN invocations,
+// this is logged once with the motion fields and this row's state for the slot, plus the last HIST invocations (kind,
+// clock, flags, walked/debt/held, which of bones/cloth/root changed, cloth job entries), and again when it moves.
+// D 18/10 first build: Seymour (id 0x113F) has a static skeleton in this battle (clock 0x100, no step bit), so what
+// moves him is cloth and root. Observe only.
+static int g_freezediag = 0;
+enum { FREEZE_RUN = 12, HIST = 16 };
+struct FreezeHist { char kind; uint8_t walked, debt, held, chg, jobs; int32_t clock; uint32_t flags; };
+struct FreezeState { uint16_t id; uint8_t logged; uint8_t pos; uint32_t hb, hc, hr; int run; LONG jobs; FreezeHist h[HIST]; };
+static FreezeState* g_fs = nullptr;              // MAXA
+static LONG g_freeze_inv = 0;
+static const uint32_t ROOT = 0x1DC;              // root matrix (X2-SMOOTH-002, S)
+// FREEZEDIAG-ID / -ID-END (decimal actor ids): every invocation of these actors is traced while a magic DLL is loaded.
+// U 18/10: the freeze comes during Blitz Ace (magic_0749) three times; Seymour 0x113F = 4415.
+static int g_trace_id = 0, g_trace_id_end = 0;
+static volatile LONG g_magic_loaded = 0;
+static void fd_on_load(uint8_t*, uint32_t, const char*) { InterlockedIncrement(&g_magic_loaded); }
+static void fd_on_unload(uint8_t*) { InterlockedDecrement(&g_magic_loaded); }
+
+static uint32_t fnv(uint32_t h, const void* p, size_t n) {
+    const uint32_t* w = (const uint32_t*)p;
+    for (size_t i = 0; i < n / 4; i++) { h ^= w[i]; h *= 16777619u; }
+    return h;
+}
+
+static void freeze_diag() {
+    uint8_t* base = *g_table;
+    int n = *g_count;
+    if (!base || n <= 0) return;
+    if (n > MAXA) n = MAXA;
+    char kind = "LRBS"[g_kind & 3];
+    InterlockedIncrement(&g_freeze_inv);
+    for (int i = 0; i < n; i++) {
+        uint8_t* a = base + i * STRIDE;
+        FreezeState& s = g_fs[i];
+        if (a[ACTIVE] == 0 || *(uint32_t*)(a + PARENT) != 0) { s.id = 0; continue; }
+        int nb = bone_count(a);
+        const uint8_t* bones = *(uint8_t* const*)(a + BONES);
+        if (!nb || !bones) { s.id = 0; continue; }
+        uint32_t hb = 2166136261u, hc = 2166136261u, hr = fnv(2166136261u, a + ROOT, 64);
+        for (int b = 0; b < nb; b++) hb = fnv(hb, bones + b * BONE_STRIDE + BANG[0], 12);
+        for_dyn_mesh(a, [&](uint8_t*, float* vtex, uint32_t nv) { hc = fnv(hc, vtex, (nv < 512 ? nv : 512) * 16); });
+        LONG jobs = g_cjob_calls[i];
+        uint16_t id = *(const uint16_t*)a;
+        uint8_t chg = (hb != s.hb ? 1 : 0) | (hc != s.hc ? 2 : 0) | (hr != s.hr ? 4 : 0);
+        FreezeHist& e = s.h[s.pos++ % HIST];
+        e.kind = kind; e.walked = g_walked[i]; e.debt = g_debt[i]; e.held = g_held[i];
+        e.clock = *(int32_t*)(a + M_CLOCK); e.flags = *(uint32_t*)(a + FLAGS);
+        e.chg = chg; e.jobs = (uint8_t)(jobs - s.jobs);
+        s.jobs = jobs; s.hb = hb; s.hc = hc; s.hr = hr;
+        if (g_magic_loaded > 0 && id >= g_trace_id && id <= g_trace_id_end) {
+            const float* r = (const float*)(a + ROOT);
+            log_line("X2-SMOOTH-003-FREEZEDIAG trace: inv %ld %c slot %d id 0x%04X chg %d jobs %d wdh %d%d%d clock 0x%X seq 0x%X flags 0x%08X "
+                     "root (%.2f, %.2f, %.2f) fwd (%.3f, %.3f) start 0x%X end 0x%X len 0x%X loops %d short %d | stock %ld lend %ld wrap %ld clamp %ld ghold %ld",
+                     g_freeze_inv, kind, i, id, chg, e.jobs, e.walked, e.debt, e.held, e.clock, *(uint32_t*)(a + M_SEQ), e.flags,
+                     r[12], r[13], r[14], r[8], r[10], *(int32_t*)(a + M_START), *(int32_t*)(a + M_END), *(int32_t*)(a + M_LEN),
+                     (int)*(int16_t*)(a + M_LOOPS), short_loop(a), g_stock_steps, g_loopend_holds, g_guard_wrap, g_guard_clamp, g_guard_hold);
+        }
+        if (s.id != id) { s.id = id; s.run = 0; s.logged = 0; continue; }
+        if (chg == 0) {
+            if (++s.run == FREEZE_RUN && !s.logged) {
+                s.logged = 1;
+                log_line("X2-SMOOTH-003-FREEZEDIAG: pose still %d inv (inv %ld %c) slot %d id 0x%04X bones %d | clock 0x%X seq 0x%X "
+                         "start 0x%X end 0x%X len 0x%X loops %d flags 0x%08X | shortloop %d stockid %d freeze %d half %d live %d",
+                         s.run, g_freeze_inv, kind, i, id, nb, *(int32_t*)(a + M_CLOCK), *(uint32_t*)(a + M_SEQ),
+                         *(int32_t*)(a + M_START), *(int32_t*)(a + M_END), *(int32_t*)(a + M_LEN), (int)*(int16_t*)(a + M_LOOPS),
+                         *(uint32_t*)(a + FLAGS), short_loop(a), stock_id(a), (int)*g_freeze, *g_half, smooth_live(3));
+                char line[900];
+                int k = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                                    "X2-SMOOTH-003-FREEZEDIAG:   last %d (kind clock flags walked/debt/held changed(b1 c2 r4) jobs):", HIST);
+                for (int j = 0; j < HIST && k > 0; j++) {
+                    const FreezeHist& f = s.h[(s.pos + j) % HIST];
+                    int w = _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " %c %X %08X %d%d%d c%d j%d;", f.kind ? f.kind : '-', f.clock,
+                                        f.flags, f.walked, f.debt, f.held, f.chg, f.jobs);
+                    if (w < 0) break;
+                    k += w;
+                }
+                log_line("%s", line);
+            }
+        } else {
+            if (s.logged)
+                log_line("X2-SMOOTH-003-FREEZEDIAG: pose moves after %d inv (inv %ld %c, changed %d, jobs %d) slot %d id 0x%04X | clock 0x%X "
+                         "seq 0x%X start 0x%X end 0x%X len 0x%X loops %d flags 0x%08X",
+                         s.run, g_freeze_inv, kind, chg, e.jobs, i, id, *(int32_t*)(a + M_CLOCK), *(uint32_t*)(a + M_SEQ),
+                         *(int32_t*)(a + M_START), *(int32_t*)(a + M_END), *(int32_t*)(a + M_LEN), (int)*(int16_t*)(a + M_LOOPS),
+                         *(uint32_t*)(a + FLAGS));
+            s.run = 0; s.logged = 0;
+        }
+    }
+}
+
 static void pre() {
     if (!g_patched) {
         g_patched = true;
@@ -664,6 +767,7 @@ static void pre() {
 }
 
 static void post() {
+    if (g_fs) __try { freeze_diag(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_fs = nullptr; log_line("X2-SMOOTH-003-FREEZEDIAG: fault - off"); }
     static LONG last = 0;
     if (g_walks - last >= 1800) {
         last = g_walks;
@@ -766,6 +870,18 @@ static bool install() {
         log_line("  X2-SMOOTH-003-STOCK-ID: actors %d..%d (0x%04X..0x%04X) take whole stock steps", g_stock_id,
                  g_stock_id_end ? g_stock_id_end : g_stock_id, g_stock_id, g_stock_id_end ? g_stock_id_end : g_stock_id);
     g_shortloop = config_row("X2-SMOOTH-003-SHORTLOOP", 1);
+    g_freezediag = config_row("X2-SMOOTH-003-FREEZEDIAG", 0);
+    if (g_freezediag) {
+        g_fs = (FreezeState*)calloc(MAXA, sizeof(FreezeState));
+        g_freezediag_on = g_fs != nullptr;
+        g_trace_id = config_row("X2-SMOOTH-003-FREEZEDIAG-ID", 0);
+        g_trace_id_end = config_row("X2-SMOOTH-003-FREEZEDIAG-ID-END", 0);
+        if (!g_trace_id_end) g_trace_id_end = g_trace_id;
+        if (g_trace_id && g_fs && magic_mods_subscribe("X2-SMOOTH-003-FREEZEDIAG", fd_on_load, fd_on_unload))
+            log_line("  X2-SMOOTH-003-FREEZEDIAG: trace ids 0x%04X..0x%04X while a magic DLL is loaded", g_trace_id, g_trace_id_end);
+        else g_trace_id = 0x10000;
+        log_line("  X2-SMOOTH-003-FREEZEDIAG: %s (pose unchanged for %d invocations is logged)", g_fs ? "on" : "out of memory - off", FREEZE_RUN);
+    }
     g_clothhold = config_row("X2-SMOOTH-003-CLOTHHOLD", 4);
     g_extrap_pct = config_row("X2-SMOOTH-003-CLOTHEXTRAP-PCT", 50);
     if (g_clothhold != 0 && (g_clothhold < 2 || g_clothhold > 4)) {
