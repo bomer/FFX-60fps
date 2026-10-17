@@ -106,27 +106,36 @@ static const Opt k_opts[] = {
 };
 enum { N_OPTS = sizeof(k_opts) / sizeof(k_opts[0]) };
 
-// ---------------------------------------------------------------- FFX text (RETRY-UI-011)
-static const char k_punct[] = " !\"#$%&'()*+,-./:;<=>?";       // 0x3A.. (the quotes are curly in the game font)
+// ---------------------------------------------------------------- text (text.cpp: the current language's glyph table)
+static uint8_t g_txt_label[N_OPTS][48];             // 2 bytes per letter in Japanese
+static uint8_t g_txt_val[N_OPTS][3][24];
+static uint8_t g_txt_help[N_OPTS][3][128];
+static int     g_text_lang = -1;                     // language the buffers hold (-1 = none yet)
 
-static bool encode(const char* s, uint8_t* out, int n) {
-    int i = 0;
-    for (; *s && i < n - 1; s++) {
-        char c = *s;
-        const char* p;
-        if (c >= '0' && c <= '9') out[i++] = (uint8_t)(0x30 + c - '0');
-        else if (c >= 'A' && c <= 'Z') out[i++] = (uint8_t)(0x50 + c - 'A');
-        else if (c >= 'a' && c <= 'z') out[i++] = (uint8_t)(0x70 + c - 'a');
-        else if ((p = strchr(k_punct, c)) != nullptr) out[i++] = (uint8_t)(0x3A + (p - k_punct));
-        else return false;
+static bool encode_all(int lang) {
+    for (int i = 0; i < N_OPTS; i++) {
+        const Opt& o = k_opts[i];
+        if (ffx_text_encode(o.label, g_txt_label[i], sizeof(g_txt_label[i]), lang) < 0) return false;
+        for (int v = 0; v < o.nvals; v++) {
+            if (o.vals[v] && ffx_text_encode(o.vals[v], g_txt_val[i][v], sizeof(g_txt_val[i][v]), lang) < 0) return false;
+            if (ffx_text_encode(o.help[v] ? o.help[v] : o.help[0], g_txt_help[i][v], sizeof(g_txt_help[i][v]), lang) < 0)
+                return false;
+        }
     }
-    out[i] = 0;
-    return *s == 0;
+    return true;
 }
 
-static uint8_t g_txt_label[N_OPTS][24];
-static uint8_t g_txt_val[N_OPTS][3][12];
-static uint8_t g_txt_help[N_OPTS][3][64];
+// At page enter (the language is only known once the game runs; it can change in the system settings).
+static void text_for_language() {
+    int lang = ffx_text_lang();
+    if (lang == g_text_lang) return;
+    if (!encode_all(lang)) {
+        log_line("CFG-MENU: text does not fit the glyph table of language %d - Latin table used", lang);
+        encode_all(1);
+    }
+    g_text_lang = lang;
+    log_line("CFG-MENU: row text for text language %d", lang);
+}
 
 static CfgRow g_rows[N_OPTS];
 static void*  g_arr[MAX_STOCK + N_OPTS];
@@ -194,6 +203,7 @@ static void __cdecl h_enter(void* desc) {
             if (cur == (void*)g_arr) { cur = g_stock; n = g_stock_n; }   // entered again with ours still in place
             else { g_stock = cur; g_stock_n = n; }
             g_top = 0;
+            text_for_language();
             if (cur && n > 0 && n <= MAX_STOCK) {
                 memcpy(g_arr, cur, n * sizeof(void*));
                 for (int i = 0; i < N_OPTS; i++) g_arr[n + i] = &g_rows[i];
@@ -299,12 +309,6 @@ static bool install() {
 
     for (int i = 0; i < N_OPTS; i++) {
         const Opt& o = k_opts[i];
-        bool ok = encode(o.label, g_txt_label[i], sizeof(g_txt_label[i]));
-        for (int v = 0; v < o.nvals; v++) {
-            if (o.vals[v]) ok = encode(o.vals[v], g_txt_val[i][v], sizeof(g_txt_val[i][v])) && ok;
-            ok = encode(o.help[v] ? o.help[v] : o.help[0], g_txt_help[i][v], sizeof(g_txt_help[i][v])) && ok;
-        }
-        if (!ok) { log_line("  CFG-MENU: text for '%s' does not fit the FFX charset - refused", o.label); return false; }
         CfgRow& r = g_rows[i];
         memset(&r, 0, sizeof(r));
         r.nvals = o.nvals;
@@ -314,6 +318,10 @@ static bool install() {
         r.label = ID_LABEL + i;
         for (int v = 0; v < o.nvals; v++) r.vals[v] = ID_VALUE + i * 4 + v;
     }
+    ffx_text_init();
+    static const int k_langs[] = { 1, 0, 9 };      // Latin, Japanese, Korean/Chinese tables
+    for (int lang : k_langs)
+        if (!encode_all(lang)) { log_line("  CFG-MENU: row text does not fit the glyph table of language %d - refused", lang); return false; }
     log_line("  CFG-MENU: enter gva=0x%08X label gva=0x%08X help gva=0x%08X; cursor 0x%08X count 0x%08X array 0x%08X; %d rows",
              rt_to_gva_exe(g_enter_fn), rt_to_gva_exe(g_label_fn), rt_to_gva_exe(g_help_fn), rt_to_gva_exe((void*)g_cursor),
              rt_to_gva_exe((void*)g_count), rt_to_gva_exe((void*)g_array), N_OPTS);

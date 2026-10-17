@@ -103,6 +103,7 @@
     <ClCompile Include="src\x\pacing.cpp" />
     <ClCompile Include="src\x\rollback.cpp" />
     <ClCompile Include="src\x\rows.cpp" />
+    <ClCompile Include="src\x\text.cpp" />
     <ClCompile Include="src\x\capture.cpp" />
     <ClCompile Include="src\x\capture_config.cpp" />
     <ClCompile Include="src\x\rows\MAG-008.cpp" />

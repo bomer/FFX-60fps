@@ -36,6 +36,10 @@ void config_load();
 int  config_row(const char* row_id, int def);   // [rows] ROW_ID=0|1
 void config_str(const char* sect, const char* key, char* buf, int n, const char* def);
 bool config_write(const char* sect, const char* key, const char* value);   // game-folder fps60.ini
+// text.cpp: mod text in the game's glyph table for a text language (0 jp, 9 kr, 10 ch, else Latin).
+bool ffx_text_init();                            // resolves the language getter once (install time)
+int  ffx_text_lang();                            // current text language (1 = Latin if unknown)
+int  ffx_text_encode(const char* ascii, uint8_t* out, int n, int lang);   // bytes written, -1 = no glyph / too long
 
 
 // ---------------------------------------------------------------- sigs.cpp (ported from FRAMEDIFF)

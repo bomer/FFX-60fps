@@ -71,10 +71,24 @@ static int      g_prompt_inv = 0;                    // invocations since the pr
 static bool     g_prompt_seen = false;               // the window left state 0/4 at least once
 static bool     g_chord = true;                     // QOL-RETRY-CHORD: prompt after the SR-008 soft-reset chord too
 
-// FFX charset: {09 30}{10 30}Retry{03}{10 31}Give up{00} (stock save-sphere layout, RETRY-UI-012; A=0x50, a=0x70,
-// space 0x3A, line feed 0x03)
-static const uint8_t k_text[] = { 0x09, 0x30, 0x10, 0x30, 0x61, 0x74, 0x83, 0x81, 0x88, 0x03,
-                                  0x10, 0x31, 0x56, 0x78, 0x85, 0x74, 0x3A, 0x84, 0x7F, 0x00 };
+// {09 30}{10 30}Retry{03}{10 31}Give up{00} (stock save-sphere layout, RETRY-UI-012; line feed 0x03), the words in the
+// current text language's glyph table (text.cpp), built when the prompt opens.
+static uint8_t g_text[64];
+
+static void build_text() {
+    static const uint8_t head[] = { 0x09, 0x30, 0x10, 0x30 }, mid[] = { 0x03, 0x10, 0x31 };
+    int lang = ffx_text_lang(), n = 0;
+    for (int pass = 0; pass < 2; pass++, lang = 1) {   // second pass: Latin table if a word does not fit
+        n = 0;
+        memcpy(g_text, head, sizeof(head)); n += sizeof(head);
+        int a = ffx_text_encode("Retry", g_text + n, (int)sizeof(g_text) - n, lang);
+        if (a < 0) continue;
+        n += a;
+        memcpy(g_text + n, mid, sizeof(mid)); n += sizeof(mid);
+        int b = ffx_text_encode("Give up", g_text + n, (int)sizeof(g_text) - n, lang);
+        if (b >= 0) return;
+    }
+}
 static int g_style = 0;                             // QOL-RETRY-STYLE: 0 field dialogue (choices), 1 battle caption
 
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
@@ -163,7 +177,8 @@ static void open_prompt() {
     // one line ("Retry: Title") and took no input (U 16/10/2026).
     if (g_style == 1) g_w_style(WIN, 1, 0x2402);
     else g_w_style(WIN, 0, 0);
-    g_w_text(WIN, (int)(uintptr_t)k_text, (int)(uintptr_t)k_text);
+    build_text();
+    g_w_text(WIN, (int)(uintptr_t)g_text, (int)(uintptr_t)g_text);
     g_w_anchor(WIN, 4, 0x100, 0xE0);
     g_w_anchor2(WIN, g_style == 1 ? 4 : WIN);
     g_w_focus(WIN);
@@ -300,6 +315,7 @@ static void stop() {                                 // dev hot reload: close ou
 #define NEED(x) do { if (!(x)) { log_line("  QOL-RETRY: " #x " not resolved - refused"); return false; } } while (0)
 
 static bool install() {
+    ffx_text_init();
     g_chord = config_row("QOL-RETRY-CHORD", 1) != 0;
     g_style = config_row("QOL-RETRY-STYLE", 0);
     g_setup_fn = sig_find_unique("QOL-RETRY MsBattleSetupEncounter",
