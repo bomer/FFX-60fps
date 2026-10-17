@@ -72,22 +72,20 @@ static bool     g_prompt_seen = false;               // the window left state 0/
 static bool     g_chord = true;                     // QOL-RETRY-CHORD: prompt after the SR-008 soft-reset chord too
 
 // {09 30}{10 30}Retry{03}{10 31}Give up{00} (stock save-sphere layout, RETRY-UI-012; line feed 0x03), the words in the
-// current text language's glyph table (text.cpp), built when the prompt opens.
-static uint8_t g_text[64];
+// current text language (text.cpp), built when the prompt opens.
+static uint8_t g_text[96];
 
 static void build_text() {
     static const uint8_t head[] = { 0x09, 0x30, 0x10, 0x30 }, mid[] = { 0x03, 0x10, 0x31 };
-    int lang = ffx_text_lang(), n = 0;
-    for (int pass = 0; pass < 2; pass++, lang = 1) {   // second pass: Latin table if a word does not fit
-        n = 0;
-        memcpy(g_text, head, sizeof(head)); n += sizeof(head);
-        int a = ffx_text_encode("Retry", g_text + n, (int)sizeof(g_text) - n, lang);
-        if (a < 0) continue;
-        n += a;
-        memcpy(g_text + n, mid, sizeof(mid)); n += sizeof(mid);
-        int b = ffx_text_encode("Give up", g_text + n, (int)sizeof(g_text) - n, lang);
-        if (b >= 0) return;
-    }
+    const char* a = (const char*)ffx_text(T_P_RETRY);
+    const char* b = (const char*)ffx_text(T_P_GIVEUP);
+    size_t la = strlen(a), lb = strlen(b), n = 0;
+    if (sizeof(head) + la + sizeof(mid) + lb + 1 > sizeof(g_text)) { a = b = ""; la = lb = 0; }
+    memcpy(g_text + n, head, sizeof(head)); n += sizeof(head);
+    memcpy(g_text + n, a, la); n += la;
+    memcpy(g_text + n, mid, sizeof(mid)); n += sizeof(mid);
+    memcpy(g_text + n, b, lb); n += lb;
+    g_text[n] = 0;
 }
 static int g_style = 0;                             // QOL-RETRY-STYLE: 0 field dialogue (choices), 1 battle caption
 

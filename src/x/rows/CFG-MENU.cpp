@@ -78,10 +78,10 @@ static void set_reset(int v) { row_set(row_SR003, v == 0); }
 static int  get_turbo()   { return row_get(row_DEVTURBO); }
 static void set_turbo(int v) { row_set(row_DEVTURBO, v == 0); }
 
-struct Opt {
-    const char* label;
-    const char* vals[3];                            // nullptr = stock ON / OFF text
-    const char* help[3];                            // per value; nullptr = help[0]
+struct Opt {                                        // T_* = text_strings.h ids (text/strings.json, per language)
+    int  label;
+    int  vals[3];                                   // -1 = stock ON / OFF text
+    int  help[3];                                   // per value
     int  nvals;
     int  (*get)();
     void (*set)(int v);
@@ -89,53 +89,16 @@ struct Opt {
 };
 
 static const Opt k_opts[] = {
-    { "60 FPS", {}, { "Run the game at 60 frames per second.", "Original 30 frames per second." }, 2, get_fps, set_fps },
-    { "Smooth Motion", {}, { "Smooth camera and character motion (F7 in game).",
-      "Original camera and character motion." }, 2, get_smooth, set_smooth },
-    { "Sensor (All)", {}, { "All party members have Sensor, no armor needed.",
-      "Sensor from armor only." }, 2, get_sensor, set_sensor },
-    { "AP (All)", {}, { "Party members who did not fight earn AP too.", "Only members who fought earn AP." }, 2,
-      get_ap, set_ap },
-    { "Non-Fighter AP", { "Full", "Half" }, { "Members who did not fight earn full AP.",
-      "Members who did not fight earn half AP." }, 2, get_rate, set_rate, ap_on },
-    { "Battle Retry", {}, { "After a party wipe, choose Retry or Give up.", "Original game over." }, 2,
-      get_retry, set_retry },
-    { "Soft Reset", {}, { "Hold the soft reset buttons to return to the title.", "No soft reset." }, 2,
-      get_reset, set_reset },
-    { "Turbo", {}, { "Hold the turbo key (fps60.ini) to fast-forward.", "No turbo key." }, 2, get_turbo, set_turbo },
+    { T_L_FPS,    { -1, -1 }, { T_H_FPS_ON, T_H_FPS_OFF }, 2, get_fps, set_fps },
+    { T_L_SMOOTH, { -1, -1 }, { T_H_SMOOTH_ON, T_H_SMOOTH_OFF }, 2, get_smooth, set_smooth },
+    { T_L_SENSOR, { -1, -1 }, { T_H_SENSOR_ON, T_H_SENSOR_OFF }, 2, get_sensor, set_sensor },
+    { T_L_AP,     { -1, -1 }, { T_H_AP_ON, T_H_AP_OFF }, 2, get_ap, set_ap },
+    { T_L_NFAP,   { T_V_FULL, T_V_HALF }, { T_H_NFAP_FULL, T_H_NFAP_HALF }, 2, get_rate, set_rate, ap_on },
+    { T_L_RETRY,  { -1, -1 }, { T_H_RETRY_ON, T_H_RETRY_OFF }, 2, get_retry, set_retry },
+    { T_L_RESET,  { -1, -1 }, { T_H_RESET_ON, T_H_RESET_OFF }, 2, get_reset, set_reset },
+    { T_L_TURBO,  { -1, -1 }, { T_H_TURBO_ON, T_H_TURBO_OFF }, 2, get_turbo, set_turbo },
 };
 enum { N_OPTS = sizeof(k_opts) / sizeof(k_opts[0]) };
-
-// ---------------------------------------------------------------- text (text.cpp: the current language's glyph table)
-static uint8_t g_txt_label[N_OPTS][48];             // 2 bytes per letter in Japanese
-static uint8_t g_txt_val[N_OPTS][3][24];
-static uint8_t g_txt_help[N_OPTS][3][128];
-static int     g_text_lang = -1;                     // language the buffers hold (-1 = none yet)
-
-static bool encode_all(int lang) {
-    for (int i = 0; i < N_OPTS; i++) {
-        const Opt& o = k_opts[i];
-        if (ffx_text_encode(o.label, g_txt_label[i], sizeof(g_txt_label[i]), lang) < 0) return false;
-        for (int v = 0; v < o.nvals; v++) {
-            if (o.vals[v] && ffx_text_encode(o.vals[v], g_txt_val[i][v], sizeof(g_txt_val[i][v]), lang) < 0) return false;
-            if (ffx_text_encode(o.help[v] ? o.help[v] : o.help[0], g_txt_help[i][v], sizeof(g_txt_help[i][v]), lang) < 0)
-                return false;
-        }
-    }
-    return true;
-}
-
-// At page enter (the language is only known once the game runs; it can change in the system settings).
-static void text_for_language() {
-    int lang = ffx_text_lang();
-    if (lang == g_text_lang) return;
-    if (!encode_all(lang)) {
-        log_line("CFG-MENU: text does not fit the glyph table of language %d - Latin table used", lang);
-        encode_all(1);
-    }
-    g_text_lang = lang;
-    log_line("CFG-MENU: row text for text language %d", lang);
-}
 
 static CfgRow g_rows[N_OPTS];
 static void*  g_arr[MAX_STOCK + N_OPTS];
@@ -203,7 +166,6 @@ static void __cdecl h_enter(void* desc) {
             if (cur == (void*)g_arr) { cur = g_stock; n = g_stock_n; }   // entered again with ours still in place
             else { g_stock = cur; g_stock_n = n; }
             g_top = 0;
-            text_for_language();
             if (cur && n > 0 && n <= MAX_STOCK) {
                 memcpy(g_arr, cur, n * sizeof(void*));
                 for (int i = 0; i < N_OPTS; i++) g_arr[n + i] = &g_rows[i];
@@ -225,12 +187,12 @@ static void __cdecl h_enter(void* desc) {
 
 static uint8_t* lookup(uint32_t id, bool help) {
     id &= 0xFFFF;
-    if (id >= ID_LABEL && id < ID_LABEL + N_OPTS && !help) return g_txt_label[id - ID_LABEL];
+    if (id >= ID_LABEL && id < ID_LABEL + N_OPTS && !help) return (uint8_t*)ffx_text(k_opts[id - ID_LABEL].label);
     if (id >= ID_VALUE && id < ID_VALUE + N_OPTS * 4) {
         int i = (id - ID_VALUE) / 4, v = (id - ID_VALUE) % 4;
         if (v >= k_opts[i].nvals) v = 0;
-        if (help) return g_txt_help[i][v];
-        if (k_opts[i].vals[v]) return g_txt_val[i][v];
+        if (help) return (uint8_t*)ffx_text(k_opts[i].help[v]);
+        if (k_opts[i].vals[v] >= 0) return (uint8_t*)ffx_text(k_opts[i].vals[v]);
         return g_label(v == 0 ? ID_ON : ID_OFF);
     }
     return nullptr;
@@ -319,9 +281,6 @@ static bool install() {
         for (int v = 0; v < o.nvals; v++) r.vals[v] = ID_VALUE + i * 4 + v;
     }
     ffx_text_init();
-    static const int k_langs[] = { 1, 0, 9 };      // Latin, Japanese, Korean/Chinese tables
-    for (int lang : k_langs)
-        if (!encode_all(lang)) { log_line("  CFG-MENU: row text does not fit the glyph table of language %d - refused", lang); return false; }
     log_line("  CFG-MENU: enter gva=0x%08X label gva=0x%08X help gva=0x%08X; cursor 0x%08X count 0x%08X array 0x%08X; %d rows",
              rt_to_gva_exe(g_enter_fn), rt_to_gva_exe(g_label_fn), rt_to_gva_exe(g_help_fn), rt_to_gva_exe((void*)g_cursor),
              rt_to_gva_exe((void*)g_count), rt_to_gva_exe((void*)g_array), N_OPTS);
