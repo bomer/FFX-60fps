@@ -40,23 +40,99 @@ static void note_chain(int i) {
         if (g_ch[j].op == c.op && g_ch[j].paused == c.paused && !memcmp(g_ch[j].f, c.f, sizeof(c.f))) { g_ch[j].n++; return; }
     if (g_nch < MAXCH) { c.n = 1; g_ch[g_nch++] = c; }
 }
-// Per (op, program) counts: the current program is [0x01CF5A44] (Ppp_ProgramStep 0x7FEE2E stores it before the group
-// loop). Logged every 10 s for pairs whose paused calls fall below 80 % of their live calls (live >= 40): the program
-// that draws less on paused steps (U 17/10/2026: Full Throttle glow blink, F11 fixes it; pppKeTh paused 105 / live 325).
-static void* volatile* g_curprog = (void* volatile*)0x01CF5A44;   // rebased at install
-struct PP { void* prog; int op; LONG p, l; };
-enum { MAXPP = 256 };
-static PP g_pp[MAXPP];
-static int g_npp = 0;
-static void note_pp(int i, bool paused) {
-    void* pr = *g_curprog;
-    for (int j = 0; j < g_npp; j++)
-        if (g_pp[j].prog == pr && g_pp[j].op == i) { if (paused) g_pp[j].p++; else g_pp[j].l++; return; }
-    if (g_npp < MAXPP) { g_pp[g_npp] = { pr, i, paused ? 1 : 0, paused ? 0 : 1 }; g_npp++; }
+// Per (program, caller class, op) counts by INVOCATION KIND (logic / render-only), not by the pause flag. The program
+// and caller class come from X2-MAG-006's Ppp_ProgramStep hook (the pointer the step was called with; cls 1 DLL caller,
+// 2 EXE caller, 3 field step, 0 = op called outside any step, e.g. deferred callback lists). Per program also: steps,
+// particles on +0x30 before / after the step, step ends, per kind. Logged every 10 s for programs whose render-only side
+// is below 80 % of the logic side (steps, particles or an op). U 17/10/2026: Full Throttle (magic_0681) light-ball glow
+// blinks, F11 (DLL steps unpaused) fixes it; which 0681 program draws less on render-only invocations.
+enum { HOP = 4096, HST = 1024 };
+struct OpC { void* prog; int op; int cls; LONG n[2]; LONG np; };          // np: render-only calls with the flag set
+struct StC { void* prog; int cls; LONG n[2]; LONG pb[2]; LONG pa[2]; LONG end[2]; LONG pz[2]; };  // pz: steps with 0 after
+static OpC g_oc[HOP];
+static StC g_sc[HST];
+static bool g_full = false;
+static inline uint32_t hmix(uint32_t h) { h ^= h >> 16; h *= 0x7FEB352D; h ^= h >> 15; return h; }
+static OpC* op_slot(void* prog, int op, int cls) {
+    uint32_t h = hmix((uint32_t)(uintptr_t)prog ^ (uint32_t)(op * 0x9E3779B1) ^ (uint32_t)cls << 28);
+    for (int k = 0; k < 64; k++) {
+        OpC& e = g_oc[(h + k) & (HOP - 1)];
+        if (e.n[0] == 0 && e.n[1] == 0 && !e.prog && !e.op && !e.cls) { e.prog = prog; e.op = op; e.cls = cls; return &e; }
+        if (e.prog == prog && e.op == op && e.cls == cls) return &e;
+    }
+    g_full = true;
+    return nullptr;
+}
+static StC* st_slot(void* prog, int cls) {
+    uint32_t h = hmix((uint32_t)(uintptr_t)prog ^ (uint32_t)cls << 28);
+    for (int k = 0; k < 64; k++) {
+        StC& e = g_sc[(h + k) & (HST - 1)];
+        if (!e.prog) { e.prog = prog; e.cls = cls; return &e; }
+        if (e.prog == prog && e.cls == cls) return &e;
+    }
+    g_full = true;
+    return nullptr;
+}
+static void note_pp(int i) {
+    int cls = 0;
+    void* pr = mag006_cur_step(&cls);
+    OpC* e = op_slot(pr, i + 1, cls);                       // op index + 1: slot 0 marks empty
+    if (!e) return;
+    int k = render_only() ? 1 : 0;
+    e->n[k]++;
+    if (k && *g_pause) e->np++;
+}
+static void step_note(void* prog, int cls, int before, int after, int ret) {
+    StC* e = st_slot(prog, cls);
+    if (!e) return;
+    int k = render_only() ? 1 : 0;
+    e->n[k]++; e->pb[k] += before; e->pa[k] += after;
+    if (ret) e->end[k]++;
+    if (!after) e->pz[k]++;
+}
+static bool low(LONG r, LONG l) { return l >= 20 && r * 5 < l * 4; }
+static void module_of(void* p, char* mod, size_t cb, uint32_t* off) {
+    strncpy_s(mod, cb, "?", _TRUNCATE); *off = 0;
+    HMODULE hm = nullptr;
+    if (p && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)p, &hm) && hm) {
+        char path[MAX_PATH]; GetModuleFileNameA(hm, path, MAX_PATH);
+        const char* b = strrchr(path, 0x5C); strncpy_s(mod, cb, b ? b + 1 : path, _TRUNCATE);
+        *off = (uint32_t)((uint8_t*)p - (uint8_t*)hm);
+    }
+}
+static const char* CLS[4] = { "none", "DLL", "EXE", "field" };
+static void report_pp() {
+    for (int j = 0; j < HST; j++) {
+        StC& s = g_sc[j];
+        if (!s.prog) continue;
+        bool any = low(s.n[1], s.n[0]) || (s.n[0] >= 20 && s.n[1] && low(s.pa[1] * s.n[0] / s.n[1], s.pa[0]));
+        for (int i = 0; i < HOP && !any; i++)
+            if (g_oc[i].prog == s.prog && g_oc[i].cls == s.cls && low(g_oc[i].n[1], g_oc[i].n[0])) any = true;
+        if (!any) continue;
+        char mod[64]; uint32_t off;
+        module_of(s.prog, mod, sizeof(mod), &off);
+        log_line("PPPOPS prog %p (%s+0x%X) %s: steps L %ld R %ld | parts before L %ld R %ld after L %ld R %ld | empty-after L %ld R %ld | ends L %ld R %ld",
+                 s.prog, mod, off, CLS[s.cls & 3], s.n[0], s.n[1], s.pb[0], s.pb[1], s.pa[0], s.pa[1], s.pz[0], s.pz[1], s.end[0], s.end[1]);
+        for (int i = 0; i < HOP; i++) {
+            OpC& o = g_oc[i];
+            if (o.prog == s.prog && o.cls == s.cls && (o.n[0] || o.n[1]))
+                log_line("PPPOPS   op %-24s L %ld R %ld (R flag set %ld)%s", g_name[o.op - 1], o.n[0], o.n[1], o.np,
+                         low(o.n[1], o.n[0]) ? "  <-- low on render-only" : "");
+        }
+    }
+    for (int i = 0; i < HOP; i++) {                          // ops outside any step
+        OpC& o = g_oc[i];
+        if (o.op && !o.prog && low(o.n[1], o.n[0]))
+            log_line("PPPOPS no-step op %-24s L %ld R %ld  <-- low on render-only", g_name[o.op - 1], o.n[0], o.n[1]);
+    }
+    if (g_full) log_line("PPPOPS: per-program table full, some programs not counted");
+    memset(g_oc, 0, sizeof(g_oc));
+    memset(g_sc, 0, sizeof(g_sc));
+    g_full = false;
 }
 template <int I> static void __cdecl h_op(void* a, void* b, void* c) {
     InterlockedIncrement(*g_pause ? &g_paused[I] : &g_live[I]);
-    note_pp(I, *g_pause != 0);
+    note_pp(I);
     if (g_trace[I]) note_chain(I);
     g_orig[I](a, b, c);
 }
@@ -121,14 +197,6 @@ static bool install() {
         if (!strcmp(g_name[i], key) && sig_match(g_fn[i] + 0x224, "83 3D ?? ?? ?? ?? 00 75"))
             g_pause = (volatile int32_t*)abs_operand("particle pause flag", g_fn[i] + 0x226);
     if (!g_pause) { log_line("  X2-DIAG-PPPOPS: pause flag not found - off"); return false; }
-    // current program pointer: Ppp_ProgramStep 0x7FEE2E `MOV [0x01CF5A44],ESI` (89 35 abs)
-    {
-        uint8_t* st = sig_find("X2-DIAG-PPPOPS current program store",
-            "F6 45 0C 10 89 35 ?? ?? ?? ?? 74 23 33 FF 39 7E 14", 0x7FEE2A);
-        uint8_t* cp = st ? abs_operand("current program", st + 6) : nullptr;
-        if (!cp) { log_line("  X2-DIAG-PPPOPS: current program store not found - off"); return false; }
-        g_curprog = (void* volatile*)cp;
-    }
     char tr[256];
     config_str("rows", "X2-DIAG-PPPOPS-CALLERS", tr, sizeof(tr), "pppKeShpTail3X pppKeLnsFls");
     for (int i = 0; i < g_n; i++) {
@@ -151,6 +219,7 @@ static void pre() {
         if (hook_entry("X2-DIAG-PPPOPS", g_fn[i], DETOURS[i], (void**)&g_orig[i])) hooked++;
         else log_line("X2-DIAG-PPPOPS: %s gva=0x%08X not hooked", g_name[i], rt_to_gva(g_fn[i]));
     log_line("X2-DIAG-PPPOPS: %d of %d draw ops hooked", hooked, g_n);
+    mag006_set_step_note(&step_note);
 }
 
 static void post() {
@@ -165,20 +234,7 @@ static void post() {
         g_last_live[i] = g_live[i];
         log_line("X2-DIAG-PPPOPS: %-30s gva=0x%08X  paused %ld  live %ld (10 s)", g_name[i], rt_to_gva(g_fn[i]), p, l);
     }
-    for (int j = 0; j < g_npp; j++) {
-        PP& q = g_pp[j];
-        if (q.l >= 40 && q.p * 5 < q.l * 4) {
-            char mod[64] = "?"; HMODULE hm = nullptr; uint32_t off = 0;
-            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                   (LPCSTR)q.prog, &hm) && hm) {
-                char path[MAX_PATH]; GetModuleFileNameA(hm, path, MAX_PATH);
-                const char* b = strrchr(path, 0x5C); strncpy_s(mod, b ? b + 1 : path, _TRUNCATE);
-                off = (uint32_t)((uint8_t*)q.prog - (uint8_t*)hm);
-            }
-            log_line("X2-DIAG-PPPOPS prog %p (%s+0x%X) %-24s paused %ld live %ld", q.prog, mod, off, g_name[q.op], q.p, q.l);
-        }
-    }
-    g_npp = 0;
+    report_pp();
     for (int j = 0; j < g_nch; j++) {
         Chain& c = g_ch[j];
         if (!c.n) continue;

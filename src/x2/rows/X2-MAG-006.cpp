@@ -29,6 +29,8 @@ static volatile LONG g_fresh2_calls = 0;
 static int        g_pausing = 0;                 // game thread: this row is inside a paused step
 static volatile LONG g_paused_calls = 0, g_exe_calls = 0, g_fresh_calls = 0, g_override_skipped = 0;
 extern Row row_MAG006;
+static void*  g_cur_prog = nullptr;
+static int    g_cur_cls = 0;                     // 0 none, 1 DLL caller, 2 EXE caller, 3 field step FUN_007fef20
 
 // EXE call sites paused like DLL callers (return addresses; X2-MAG-026 adds the family-X record step).
 static uint8_t* g_pause_exe[4];
@@ -216,7 +218,11 @@ static uint8_t*   g_fstep = nullptr;
 static ppp_step_t g_fstep_tramp = nullptr;
 static int __cdecl h_field_step(void* prog, uint32_t flags) {
     if (!row_MAG006.on || g_disabled) return g_fstep_tramp(prog, flags);
-    return step_deferred(prog, flags, *g_pause != 0, g_fstep_tramp);
+    void* outer = g_cur_prog; int outer_cls = g_cur_cls;
+    g_cur_prog = prog; g_cur_cls = 3;
+    int r = step_deferred(prog, flags, *g_pause != 0, g_fstep_tramp);
+    g_cur_prog = outer; g_cur_cls = outer_cls;
+    return r;
 }
 
 // Diagnostic (logged with FREEDEFER's line): steps from FUN_006a5f80 (return 0x6A5FD7, effect type 0xD4FA98 slot +8,
@@ -253,9 +259,31 @@ static void ul_unload(uint8_t* base) {
     for (int k = 0; k < MAXULD; k++) if (g_ul_mod[k].base == base) g_ul_mod[k].base = nullptr;
 }
 
+// X2-DIAG-PPPOPS: the program of the step running now and its caller class (game thread), plus a per-step callback
+// (program, caller class, particles on +0x30 before / after, return value).
+static step_note_fn g_step_note = nullptr;
+void* mag006_cur_step(int* cls) { if (cls) *cls = g_cur_cls; return g_cur_prog; }
+void  mag006_set_step_note(step_note_fn fn) { g_step_note = fn; }
+static int count_parts(void* prog) {
+    int n = 0;
+    __try {
+        for (uint8_t* p = *(uint8_t**)((uint8_t*)prog + 0x30); p && n < 8192; p = *(uint8_t**)p) n++;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { n = -1; }
+    return n;
+}
+static int ppp_step_body(void* prog, uint32_t flags, void* ret);
 static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
-    if (!row_MAG006.on || g_disabled || g_pausing) return g_tramp(prog, flags);
     void* ret = _ReturnAddress();
+    void* outer = g_cur_prog; int outer_cls = g_cur_cls;
+    g_cur_prog = prog; g_cur_cls = in_image(ret) ? 2 : 1;
+    int before = g_step_note ? count_parts(prog) : 0;
+    int r = ppp_step_body(prog, flags, ret);
+    if (g_step_note) g_step_note(prog, g_cur_cls, before, count_parts(prog), r);
+    g_cur_prog = outer; g_cur_cls = outer_cls;
+    return r;
+}
+static int ppp_step_body(void* prog, uint32_t flags, void* ret) {
+    if (!row_MAG006.on || g_disabled || g_pausing) return g_tramp(prog, flags);
     if ((uint32_t)((uint8_t*)ret - exe_base()) == g_ret5f) {
         int32_t pv = *g_pause;
         InterlockedIncrement(&g_t5f[pacing_kind() & 3][pv == 0 ? 0 : pv == 1 ? 1 : 2]);
