@@ -172,7 +172,7 @@ static void post() {
             if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                    (LPCSTR)q.prog, &hm) && hm) {
                 char path[MAX_PATH]; GetModuleFileNameA(hm, path, MAX_PATH);
-                const char* b = strrchr(path, '\'); strncpy_s(mod, b ? b + 1 : path, _TRUNCATE);
+                const char* b = strrchr(path, 0x5C); strncpy_s(mod, b ? b + 1 : path, _TRUNCATE);
                 off = (uint32_t)((uint8_t*)q.prog - (uint8_t*)hm);
             }
             log_line("X2-DIAG-PPPOPS prog %p (%s+0x%X) %-24s paused %ld live %ld", q.prog, mod, off, g_name[q.op], q.p, q.l);
