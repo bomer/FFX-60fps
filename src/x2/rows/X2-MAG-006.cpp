@@ -106,11 +106,76 @@ static void deferred_flush(void* prog, bool drop) {
 // program's next UNPAUSED step (its ops then run on them, the stock order). A paused step keeps them queued: EXE-called
 // programs (field particles, e.g. the pyrefly river) also run paused on render-only frames whenever a magic DLL left the
 // pause flag set (magic_0718's draw entry writes it per draw; U 16/10/2026: river blinks ~1/s on the mission screen).
+// X2-FX-011-FREEDEFER (default 1; U 17/10/2026: Full Throttle light-ball glow blinks, F11 fixes it; re/ledger/LENS-GLOW.md).
+// The end-of-step tail of the group loops (unpaused steps only, gate 0x80605D) frees a particle whose age +0xC reached
+// its life (0x806118 / twin 0x806556: `push 0; push esi; mov [edx],edi; call FUN_00804b80`). Particles that live one
+// tick are emitted, drawn and freed inside one unpaused step, so the paused render-only step that follows has nothing
+// to draw (pppKeShpTail3X / pppKeLns* 0 paused calls). Under 60 Hz pacing the free is deferred: the particle stays on the
+// program's list with age -= 0x1000 (the age it was drawn at), the paused step draws it unchanged (paused steps spawn,
+// age and free nothing), and it is unlinked and freed at the start of the program's next unpaused step, before that
+// step's spawn and ops (the stock order). Not deferred when it would empty a one-shot program's list (+0x1D: the step
+// would report the end one step late).
+typedef void(__cdecl* pfree_t)(void* part, int flag);
+static pfree_t   g_pfree = nullptr;               // FUN_00804b80
+static int       g_freedefer = 0;
+static uint8_t*  g_free_site[2] = {};
+static void*     g_free_keep[2] = {};             // 0x8060AB / 0x8063F7
+static void*     g_free_after[2] = {};            // 0x8060B0 / 0x8063FC (after the original free)
+struct FreeQ { void* prog; void* part; };
+enum { MAXFQ = 2048 };
+static FreeQ     g_fq[MAXFQ];
+static int       g_nfq = 0;
+static volatile LONG g_fq_total = 0, g_fq_freed = 0, g_fq_dropped = 0;
+static volatile LONG g_fq_ret = 0;
+
+static int __cdecl free_defer(uint8_t* part, uint8_t* prog) {
+    if (!g_freedefer || !row_MAG006.on || g_disabled || pacing_kind() == INV_STOCK || g_nfq >= MAXFQ) return 0;
+    if (g_defer_prog != prog) return 0;          // only inside a tracked step (it flushes the queue at the next one)
+    __try {
+        if (prog[0x1D] && *(uint8_t**)(prog + 0x30) == part && *(uint8_t**)part == nullptr) return 0;   // last of a one-shot
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    g_fq[g_nfq++] = { prog, part };
+    InterlockedIncrement(&g_fq_total);
+    return 1;
+}
+
+static void free_flush(void* prog, bool drop) {
+    int w = 0;
+    for (int i = 0; i < g_nfq; i++) {
+        FreeQ q = g_fq[i];
+        if (q.prog != prog) { g_fq[w++] = q; continue; }
+        bool done = false;
+        if (!drop) {
+            __try {
+                uint8_t** prev = (uint8_t**)((uint8_t*)prog + 0x30);
+                for (int k = 0; *prev && k < 8192; k++) {
+                    if (*prev == (uint8_t*)q.part) {
+                        *prev = *(uint8_t**)q.part;          // unlink (the original `mov [edx],edi`)
+                        g_pfree(q.part, 0);
+                        done = true;
+                        break;
+                    }
+                    prev = (uint8_t**)*prev;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        InterlockedIncrement(done ? &g_fq_freed : &g_fq_dropped);
+    }
+    g_nfq = w;
+}
+
+#define FREE_STUB(N)                                                                          __declspec(naked) static void h_free##N() {                                                       __asm { pushad }                                                                              __asm { push dword ptr [ebp + 8] }                                                            __asm { push esi }                                                                            __asm { call free_defer }                                                                     __asm { add esp, 8 }                                                                          __asm { mov g_fq_ret, eax }                                                                   __asm { popad }                                                                               __asm { cmp g_fq_ret, 0 }                                                                     __asm { je replay }                                                                           __asm { sub dword ptr [esi + 0xC], 0x1000 }                                                   __asm { jmp dword ptr [g_free_keep + N * 4] }                                                 __asm { replay: }                                                                             __asm { mov dword ptr [edx], edi }                                                            __asm { push 0 }                                                                              __asm { push esi }                                                                            __asm { call dword ptr [g_pfree] }                                                            __asm { mov edx, dword ptr [ebp - 0x20] }                                                     __asm { add esp, 8 }                                                                          __asm { jmp dword ptr [g_free_after + N * 4] }                                            }
+FREE_STUB(0)
+FREE_STUB(1)
+
 static int step_deferred(void* prog, uint32_t flags, bool will_pause, ppp_step_t step = nullptr) {
+    if (g_nfq && (!will_pause || pacing_kind() == INV_STOCK)) free_flush(prog, false);   // deferred frees first
     if (!step) step = g_tramp;
     if (!g_loopdefer || pacing_kind() == INV_STOCK) {
         if (g_deferred_n) deferred_flush(prog, false);           // stock step (e.g. a menu holds pacing): apply first
-        return step(prog, flags);
+        int r0 = step(prog, flags);
+        if (r0 && g_nfq) free_flush(prog, true);
+        return r0;
     }
     if (g_deferred_n && !will_pause) deferred_flush(prog, false);
     void* outer = g_defer_prog;
@@ -118,6 +183,7 @@ static int step_deferred(void* prog, uint32_t flags, bool will_pause, ppp_step_t
     int r = step(prog, flags);
     g_defer_prog = outer;
     if (r && g_deferred_n) deferred_flush(prog, true);           // program ended
+    if (r && g_nfq) free_flush(prog, true);                      // its kill frees the kept particles
     return r;
 }
 
@@ -207,6 +273,38 @@ static bool install() {
                      rt_to_gva(ta), rt_to_gva(g_restart_site[0]), rt_to_gva(g_restart_site[1]));
         }
     }
+    g_freedefer = g_loopdefer ? config_row("X2-FX-011-FREEDEFER", 1) : 0;   // needs LOOPDEFER's tracked steps
+    if (g_freedefer) {
+        // tail free blocks: MOV EAX,[ECX+0x14]; OR EBX,EAX; CMP [ESI+0xC],EAX; JB keep; PUSH 0; PUSH ESI; MOV [EDX],EDI;
+        // CALL free; MOV EDX,[EBP-0x20]; ADD ESP,8; JMP after
+        uint8_t* f0 = sig_find("X2-FX-011-FREEDEFER free block (FUN_00805b80)",
+            "8B 41 14 0B D8 39 46 0C 72 93 6A 00 56 89 3A E8 ?? ?? ?? ?? 8B 55 E0 83 C4 08 EB 86", 0x80610E);
+        uint8_t* f1 = sig_find("X2-FX-011-FREEDEFER free block (FUN_00806130)",
+            "8B 41 14 0B D8 39 46 0C 0F 82 ?? ?? ?? ?? 6A 00 56 89 3A E8 ?? ?? ?? ?? 8B 55 E0 83 C4 08 E9 ?? ?? ?? ??", 0x806548);
+        uint8_t* c0 = f0 ? call_target(f0 + 0xF) : nullptr;
+        uint8_t* c1 = f1 ? call_target(f1 + 0x13) : nullptr;
+        if (!c0 || c0 != c1 || !in_image(c0)) {
+            log_line("  X2-FX-011-FREEDEFER: free blocks not found or differ - off");
+            g_freedefer = 0;
+        } else {
+            g_pfree = (pfree_t)c0;
+            g_free_site[0] = f0 + 0xA;                          // 0x806118
+            g_free_site[1] = f1 + 0xE;                          // 0x806556
+            g_free_keep[0] = f0 + 0xA + (int8_t)f0[9];          // JB rel8 target 0x8060AB
+            g_free_keep[1] = f1 + 0xE + *(int32_t*)(f1 + 10);   // JB rel32 target 0x8063F7
+            g_free_after[0] = f0 + 0x1C + (int8_t)f0[0x1B];     // JMP rel8 target 0x8060B0
+            g_free_after[1] = f1 + 0x23 + *(int32_t*)(f1 + 0x1F); // JMP rel32 target 0x8063FC
+            if (!sig_match(g_free_keep[0], "8B D6 89 55 E0 8B F7") || !sig_match(g_free_keep[1], "8B D6 89 55 E0 8B F7") ||
+                (uint8_t*)g_free_after[0] != (uint8_t*)g_free_keep[0] + 5 || (uint8_t*)g_free_after[1] != (uint8_t*)g_free_keep[1] + 5) {
+                log_line("  X2-FX-011-FREEDEFER: keep / after targets not as proven - off");
+                g_freedefer = 0;
+            } else {
+                log_line("  X2-FX-011-FREEDEFER: free sites gva=0x%08X / 0x%08X (0x00806118 / 0x00806556), free gva=0x%08X, keep "
+                         "0x%08X / 0x%08X (0x008060AB / 0x008063F7)", rt_to_gva(g_free_site[0]), rt_to_gva(g_free_site[1]),
+                         rt_to_gva(c0), rt_to_gva(g_free_keep[0]), rt_to_gva(g_free_keep[1]));
+            }
+        }
+    }
     log_line("  X2-MAG-006: Ppp_ProgramStep gva=0x%08X (entry + override CALL patched on the game thread), pause flag gva=0x%08X "
              "(expected 0x01CF579C), override gva=0x%08X skipped while paused, FRESH %s",
              rt_to_gva(g_entry), rt_to_gva((const void*)g_pause), rt_to_gva(ov), g_fresh_on ? "ON" : "OFF");
@@ -242,6 +340,15 @@ static void pre() {
                      "callers%s)", g_fstep ? ", field step FUN_007fef20" : "");
         }
     }
+    if (g_freedefer && g_loopdefer) {
+        void* t0 = nullptr; void* t1 = nullptr;
+        if (!hook_entry("X2-FX-011-FREEDEFER site 0", g_free_site[0], (void*)&h_free0, &t0)) g_freedefer = 0;
+        else if (!hook_entry("X2-FX-011-FREEDEFER site 1", g_free_site[1], (void*)&h_free1, &t1)) {
+            hook_remove(g_free_site[0]);
+            g_freedefer = 0;
+        }
+        log_line("X2-FX-011-FREEDEFER: %s", g_freedefer ? "particle frees deferred to the program's next unpaused step" : "hook failed - off");
+    } else g_freedefer = 0;
 }
 
 static void post() {
@@ -273,6 +380,13 @@ static void post() {
         last_total = g_def_total;
         log_line("X2-FX-010-LOOPDEFER: deferred %ld applied %ld dropped %ld queue-full %ld (queued now %d)",
                  g_def_total, g_def_applied, g_def_dropped, g_def_full, g_deferred_n);
+    }
+    static DWORD last_fq = 0;
+    static LONG last_fq_total = 0;
+    if (g_freedefer && now - last_fq >= 10000 && g_fq_total != last_fq_total) {
+        last_fq = now;
+        last_fq_total = g_fq_total;
+        log_line("X2-FX-011-FREEDEFER: deferred %ld freed %ld dropped %ld (queued now %d)", g_fq_total, g_fq_freed, g_fq_dropped, g_nfq);
     }
     static LONG ov_seen = 0;
     if (g_override_skipped && !ov_seen) {
