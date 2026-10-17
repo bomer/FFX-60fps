@@ -10,6 +10,11 @@
 // Fix: on render-only invocations the driver runs with its clock one tick back (then restored), so no record starts
 // or ends there; records already running are called as before.
 // Evidence: outer repo re/ledger/MAG-TASK.md (S); offline scan of magicFiles/FFX-2: 71 DLLs, 1 hit each, all checks.
+// X2-MAG-030-DMG (default 1): that render-only re-run calls running records' callbacks with the same record frame as the
+// logic call before it, so frame-keyed one-shot actions run twice; for damage that uses up the multi-hit budget and the
+// later hits do nothing (U 17/10/2026: Tidus's Blitz Ace, magic_0749, half the hits had no number and no reaction; D:
+// X2-DIAG-HIT, hit checks in L/R pairs; S: magic_0749 FUN_10002e30 `if (rec+4 == 0x3E) svc+0x3CC(...)`). While the
+// re-run is active, ms_set_damage FUN_0061b150 (service +0x3CC) returns 0 without applying. Outer repo re/ledger/DMGNUM.md.
 #include "../x2.h"
 #include "../../../third_party/minhook/include/MinHook.h"
 #include <string.h>
@@ -104,6 +109,16 @@ struct Slot {
 };
 static Slot          g_slots[MAX_SLOTS];
 static volatile LONG g_held_calls = 0, g_fixups = 0;
+static int           g_in_ro_driver = 0;         // game thread: inside a render-only re-run of a T driver
+typedef uint32_t(__cdecl* setdmg_t)(uint32_t, uint32_t, uint32_t);
+static uint8_t*      g_setdmg_fn = nullptr;      // FUN_0061b150 ms_set_damage
+static setdmg_t      g_setdmg = nullptr;
+static int           g_dmg_on = 0;
+static volatile LONG g_dmg_skipped = 0;
+static uint32_t __cdecl h_setdmg(uint32_t att, uint32_t tgt, uint32_t flag) {
+    if (g_in_ro_driver) { InterlockedIncrement(&g_dmg_skipped); return 0; }
+    return g_setdmg(att, tgt, flag);
+}
 
 static uint32_t driver_common(void* ecx, void* edx, int idx) {
     Slot& s = g_slots[idx];
@@ -111,7 +126,9 @@ static uint32_t driver_common(void* ecx, void* edx, int idx) {
     InterlockedIncrement(&g_held_calls);
     int32_t c = *s.clock;
     *s.clock = c - 1;                        // start <= clock / end <= clock: as of the last logic call
+    g_in_ro_driver++;
     uint32_t r = s.orig(ecx, edx);           // exec is 0 here: the driver does not advance the clock
+    g_in_ro_driver--;
     if (*s.clock != c - 1) InterlockedIncrement(&g_fixups);
     *s.clock = c;
     return r;
@@ -172,11 +189,36 @@ static void on_unload(uint8_t* mod) {
 
 static bool install() {
     if (!magic_mods_subscribe("X2-MAG-030", on_load, on_unload)) return false;
+    g_dmg_on = config_row("X2-MAG-030-DMG", 1);
+    if (g_dmg_on) {
+        // PUSH EBP; MOV EBP,ESP; PUSH EBX; MOV EBX,[EBP+0xC]; PUSH EDI; PUSH [EBP+0x10]; MOV EDI,[EBP+8]; PUSH EBX; PUSH EDI; PUSH fmt; CALL
+        g_setdmg_fn = sig_find("X2-MAG-030-DMG ms_set_damage FUN_0061b150",
+            "55 8B EC 53 8B 5D 0C 57 FF 75 10 8B 7D 08 53 57 68 ?? ?? ?? ?? E8", 0x61B150);
+        if (!g_setdmg_fn) { log_line("  X2-MAG-030-DMG: ms_set_damage not found - off"); g_dmg_on = 0; }
+    }
     log_line("  X2-MAG-030: magic overlay load hook registered (T record driver: no record start/end on render-only)");
     return true;
 }
 
+static void pre() {
+    static bool done = false;
+    if (done || !g_dmg_on) return;
+    done = true;                                 // game thread, between invocations
+    if (!hook_entry("X2-MAG-030-DMG", g_setdmg_fn, (void*)&h_setdmg, (void**)&g_setdmg)) {
+        log_line("X2-MAG-030-DMG: hook failed - off");
+        g_dmg_on = 0;
+        return;
+    }
+    log_line("X2-MAG-030-DMG: ms_set_damage gva=0x%08X (0x0061B150) skipped inside render-only T driver re-runs",
+             rt_to_gva(g_setdmg_fn));
+}
+
 static void post() {
+    static LONG dmg_reported = 0;
+    if (g_dmg_skipped > dmg_reported && dmg_reported < 50) {
+        dmg_reported = g_dmg_skipped;
+        log_line("X2-MAG-030-DMG: duplicate damage calls skipped so far %ld", g_dmg_skipped);
+    }
     static LONG reported = 0, fix_reported = 0;
     if (!reported && g_held_calls) { reported = 1; log_line("X2-MAG-030: first T driver call held a tick back on a render-only invocation"); }
     if (!fix_reported && g_fixups) { fix_reported = 1; log_line("X2-MAG-030: a render-only driver call changed its clock (restored)"); }
@@ -185,7 +227,7 @@ static void post() {
 Row row_MAG030 = {
     "X2-MAG-030",
     "T magic overlays (magic_0718 shape): records do not start or end on render-only invocations (crash at init)",
-    1, install, nullptr, post, 0
+    1, install, pre, post, 0
 };
 
 } // namespace x2
