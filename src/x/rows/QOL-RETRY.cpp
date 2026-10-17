@@ -231,31 +231,54 @@ static void diff_report() {
     log_line("QOL-RETRY-DIFF: battle file buffer now %p; all ranges in %s", file, path);
 }
 
+static bool copy_page(uint8_t* dst, const uint8_t* src, uint32_t n) {
+    __try { memcpy(dst, src, n); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// The page test alone was not enough (D 18/10/2026 03:18:45: still faulted at the end copy), so each page is copied
+// under its own guard too.
 static void diff_copy(bool fresh) {
     for (int k = 0; k < 2; k++) {
         DiffRgn& r = g_rgn[k];
         if (!r.fresh) continue;
+        uint32_t bad = 0;
         for (uint32_t off = 0, pg = 0; off < r.len; off += 0x1000, pg++) {
             uint32_t n = r.len - off < 0x1000 ? r.len - off : 0x1000;
-            bool ok = page_readable(r.p + off) && page_readable(r.p + off + n - 1);
-            if (ok) memcpy((fresh ? r.fresh : r.end) + off, r.p + off, n);
+            bool ok = page_readable(r.p + off) && page_readable(r.p + off + n - 1) &&
+                      copy_page((fresh ? r.fresh : r.end) + off, r.p + off, n);
+            if (!ok) bad++;
             r.ok[pg] = fresh ? ok : (r.ok[pg] && ok);
         }
+        if (bad) log_line("QOL-RETRY-DIFF: %s copy: %u of %u pages not readable (skipped)", fresh ? "fresh" : "end", bad,
+                          (r.len + 0xFFF) / 0x1000);
     }
 }
 
-static void diff_step() {                           // from pre(), each invocation
-    if (!g_diff) return;
+static void diff_step_body() {
     uint8_t st = *g_a8e0;
-    if (g_diff_phase == 1 && st == 1) {
+    if (g_diff_phase == 25) {                       // the prompt opened last invocation: end copy, apart from the prompt
+        diff_copy(false);
+        g_diff_phase = 3;
+        log_line("QOL-RETRY-DIFF: end copy at the prompt");
+    } else if (g_diff_phase == 1 && st == 1) {
         diff_heap_find();
         diff_copy(true);
         g_diff_phase = 2;
         log_line("QOL-RETRY-DIFF: fresh copy at state 1");
     } else if (g_diff_phase == 4 && st == 1) {
         g_diff_phase = 0;
-        __try { diff_report(); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: fault in the report (heap span freed?)"); }
+        diff_report();
+    }
+}
+
+// A fault here turns the diagnostic off, never the row (a row fault with the prompt up hung the battle twice).
+static void diff_step() {                           // from pre(), each invocation
+    if (!g_diff) return;
+    __try { diff_step_body(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_line("QOL-RETRY-DIFF: fault 0x%08lX in phase %d - diagnostic off", GetExceptionCode(), g_diff_phase);
+        g_diff = 0;
     }
 }
 
@@ -410,11 +433,7 @@ static void pre() {
                 g_prompt_seen = false;
                 g_state = ST_PROMPT;
                 log_line("QOL-RETRY: game over (state 0x%02X): Retry / Give up prompt open", st);
-                if (g_diff && g_diff_phase == 2) {
-                    diff_copy(false);
-                    g_diff_phase = 3;
-                    log_line("QOL-RETRY-DIFF: end copy at the prompt");
-                }
+                if (g_diff && g_diff_phase == 2) g_diff_phase = 25;   // copied by diff_step next invocation
             }
             break;
         }
