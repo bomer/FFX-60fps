@@ -670,8 +670,53 @@ static void watch_step() {                          // from pre(), each invocati
     }
 }
 
+// QOL-RETRY-MAPFX (test, default 0): the bug was the map's ground sigil under Yunalesca, not her model (U 18/10/2026
+// screenshots: the ring is lit on the first fight, dark on the retry). The battle hides and dims the map particle
+// program (D 03:33/03:38 diffs, entry 13): control table 0x00D30260 + i*0x4C, flags dword +0 bit 0x10 = hidden
+// (set by FUN_00729400/FUN_00729570, cleared by FUN_00729440), 0 -> 0x10; program table 0x00D2C260 + i*0x80, +0x70
+// RGBA (u16, 0x1000 = 1.0), 1000 1000 1000 1000 -> 0800 0800 0800 1000. Count = *(u16*)([0x00D2C258] + 4). The map is
+// never reloaded on a retry. At battle setup the row copies both fields of every entry and writes them back on Retry.
+enum { MAPFX_MAX = 128 };
+static int g_mapfx = 0, g_mapfx_n = 0;
+static uint32_t g_mapfx_flags[MAPFX_MAX];
+static uint64_t g_mapfx_rgba[MAPFX_MAX];
+
+static void mapfx_take() {
+    uint8_t* eb = exe_base();
+    g_mapfx_n = 0;
+    __try {
+        uint8_t* hdr = *(uint8_t**)(eb + (0x00D2C258 - 0x400000));
+        if (!hdr) return;
+        int n = *(uint16_t*)(hdr + 4);
+        if (n > MAPFX_MAX) n = MAPFX_MAX;
+        for (int i = 0; i < n; i++) {
+            g_mapfx_flags[i] = *(uint32_t*)(eb + (0x00D30260 - 0x400000) + i * 0x4C);
+            g_mapfx_rgba[i] = *(uint64_t*)(eb + (0x00D2C260 - 0x400000) + i * 0x80 + 0x70);
+        }
+        g_mapfx_n = n;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_mapfx_n = 0; }
+}
+
+static void mapfx_put() {
+    uint8_t* eb = exe_base();
+    __try {
+        uint8_t* hdr = *(uint8_t**)(eb + (0x00D2C258 - 0x400000));
+        if (!hdr || *(uint16_t*)(hdr + 4) < g_mapfx_n) { log_line("QOL-RETRY-MAPFX: map particle list changed - left as is"); return; }
+        for (int i = 0; i < g_mapfx_n; i++) {
+            uint32_t* fl = (uint32_t*)(eb + (0x00D30260 - 0x400000) + i * 0x4C);
+            uint64_t* c = (uint64_t*)(eb + (0x00D2C260 - 0x400000) + i * 0x80 + 0x70);
+            if (*fl != g_mapfx_flags[i] || *c != g_mapfx_rgba[i])
+                log_line("QOL-RETRY-MAPFX: map particle %d flags %08X -> %08X, rgba %016llX -> %016llX", i, *fl,
+                         g_mapfx_flags[i], *c, g_mapfx_rgba[i]);
+            *fl = g_mapfx_flags[i];
+            *c = g_mapfx_rgba[i];
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-MAPFX: restore faulted"); }
+}
+
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
+    if (g_mapfx && !g_disabled && mode == 0 && !g_reissue) mapfx_take();
     if (g_chrfix && !g_disabled && mode == 0 && !g_reissue) chr_take();
     if (g_diff && mode == 0) {
         if (g_reissue && g_diff_phase == 3) { g_diff_phase = 4; diff_chr("retry setup"); }
@@ -715,6 +760,7 @@ static int __cdecl h_post(int scripted, uint32_t key, int stage, int result) {
         __try {
             restore();
             if (g_chrfix) chr_put();
+            if (g_mapfx) mapfx_put();
             if (g_watch_on && g_cs_n > 0 && g_game_tid) watch_arm(g_cs[0].obj);
             rearm_request();
             g_post_args[0] = scripted; g_post_args[1] = (int)key; g_post_args[2] = stage; g_post_args[3] = result;
@@ -919,6 +965,7 @@ static bool install() {
     g_partfix = config_row("QOL-RETRY-PARTFIX", 0);
     g_chrfix = config_row("QOL-RETRY-CHR", 0);
     g_watch_on = config_row("QOL-RETRY-WATCH", 0);
+    g_mapfx = config_row("QOL-RETRY-MAPFX", 0);
     if (g_diff)                                      // one match in fps60_image.bin
         g_chrload_fn = sig_find_unique("QOL-RETRY-DIFF load chr FUN_0082a1c0",
             "55 8B EC 81 EC 84 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 53 8B 5D 14 56 8B 75 08 57 68 80 00 00 00", 0x82A1C0);
