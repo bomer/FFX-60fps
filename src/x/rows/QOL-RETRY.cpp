@@ -393,7 +393,7 @@ static void chr_snap_take() {
         for (int i = 0; i < 100; i++) {
             uint32_t* e = tbl[i];
             if (!e || !e[3] || (e[0] & 0xF000) != 0x1000 || (uint8_t)e[1] != 1) continue;
-            obj_add((uint8_t*)(uintptr_t)e[3], 0x10000, "cache data");
+            obj_add((uint8_t*)(uintptr_t)e[3], 0x200000, "cache data");
             obj_add((uint8_t*)(uintptr_t)e[4], 0x4000, "cache obj");
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -427,9 +427,9 @@ static void chr_snap_diff(const char* why) {
                 uint32_t a = *(uint32_t*)(r.fresh + o + i), b = *(uint32_t*)(cur + i);
                 if (a == b) continue;
                 changed++;
-                if (looks_float(a) && looks_float(b)) continue;
+                if (looks_float(a) && looks_float(b) && strcmp(r.what, "cache data") != 0) continue;
                 ints++;
-                if (logged++ < 150)
+                if (logged++ < (strcmp(r.what, "cache data") ? 150 : 400))
                     log_line("QOL-RETRY-DIFF: %s %p %s +%05X fresh %08X now %08X", r.what, r.p, why, o + i, a, b);
             }
         }
