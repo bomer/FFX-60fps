@@ -217,9 +217,17 @@ static int __cdecl h_field_step(void* prog, uint32_t flags) {
     return step_deferred(prog, flags, *g_pause != 0, g_fstep_tramp);
 }
 
+// Diagnostic (logged with FREEDEFER's line): steps from FUN_006a5f80 (return 0x6A5FD7, effect type 0xD4FA98 slot +8,
+// Full Throttle's light-ball program) per invocation kind and pause value (U 17/10: glow ops never reached paused).
+static volatile LONG g_t5f[4][3];                // [kind][pause: 0 / 1 / other]
+static uint32_t g_ret5f = 0x6A5FD7 - 0x400000;   // offset; compared against the live return address
 static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
     if (!row_MAG006.on || g_disabled || g_pausing) return g_tramp(prog, flags);
     void* ret = _ReturnAddress();
+    if ((uint32_t)((uint8_t*)ret - exe_base()) == g_ret5f) {
+        int32_t pv = *g_pause;
+        InterlockedIncrement(&g_t5f[pacing_kind() & 3][pv == 0 ? 0 : pv == 1 ? 1 : 2]);
+    }
     bool exe = in_image(ret) && !listed(ret);    // listed EXE callers take the DLL path
     if (!render_only() || exe) {                 // logic steps, and EXE callers (stock pause state)
         if (exe && render_only()) InterlockedIncrement(&g_exe_calls);
@@ -420,6 +428,8 @@ static void post() {
         last_fq_total = g_fq_total;
         log_line("X2-FX-011-FREEDEFER: deferred %ld freed %ld dropped %ld one-shot ends %ld (queued now %d); FRESH2 unpaused first steps %ld",
                  g_fq_total, g_fq_freed, g_fq_dropped, g_fq_ends, g_nfq, g_fresh2_calls);
+        log_line("X2-MAG-006 diag 0x6A5FD7 steps: LOGIC p0 %ld p1 %ld pX %ld | RENDER p0 %ld p1 %ld pX %ld", g_t5f[0][0], g_t5f[0][1],
+                 g_t5f[0][2], g_t5f[1][0], g_t5f[1][1], g_t5f[1][2]);
     }
     static LONG ov_seen = 0;
     if (g_override_skipped && !ov_seen) {

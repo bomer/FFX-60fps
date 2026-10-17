@@ -25,17 +25,17 @@ static volatile LONG g_paused[MAXOPS], g_live[MAXOPS], g_last_paused[MAXOPS], g_
 // addresses as gva) with counts and the pause state, logged with the 10 s counts (U 17/10/2026 Full Throttle glow:
 // these ops are never reached on paused steps; which dispatcher calls them).
 static bool g_trace[MAXOPS];
-struct Chain { uint32_t op; uint32_t f[5]; int paused; LONG n; };
+struct Chain { uint32_t op; uint32_t f[9]; int paused; LONG n; };
 enum { MAXCH = 32 };
 static Chain g_ch[MAXCH];
 static int g_nch = 0;
 static void note_chain(int i) {
-    void* fr[6] = {};
-    USHORT k = RtlCaptureStackBackTrace(2, 5, fr, nullptr);
+    void* fr[10] = {};
+    USHORT k = RtlCaptureStackBackTrace(2, 9, fr, nullptr);
     Chain c = {};
     c.op = (uint32_t)i;
     c.paused = *g_pause ? 1 : 0;
-    for (int j = 0; j < k && j < 5; j++) c.f[j] = in_image(fr[j]) ? rt_to_gva(fr[j]) : (uint32_t)(uintptr_t)fr[j];
+    for (int j = 0; j < k && j < 9; j++) c.f[j] = in_image(fr[j]) ? rt_to_gva(fr[j]) : (uint32_t)(uintptr_t)fr[j];
     for (int j = 0; j < g_nch; j++)
         if (g_ch[j].op == c.op && g_ch[j].paused == c.paused && !memcmp(g_ch[j].f, c.f, sizeof(c.f))) { g_ch[j].n++; return; }
     if (g_nch < MAXCH) { c.n = 1; g_ch[g_nch++] = c; }
@@ -145,8 +145,8 @@ static void post() {
     for (int j = 0; j < g_nch; j++) {
         Chain& c = g_ch[j];
         if (!c.n) continue;
-        log_line("X2-DIAG-PPPOPS caller: %s %s x%ld <- %08X <- %08X <- %08X <- %08X <- %08X", g_name[c.op], c.paused ? "PAUSED" : "live",
-                 c.n, c.f[0], c.f[1], c.f[2], c.f[3], c.f[4]);
+        log_line("X2-DIAG-PPPOPS caller: %s %s x%ld <- %08X <- %08X <- %08X <- %08X <- %08X <- %08X <- %08X <- %08X <- %08X",
+                 g_name[c.op], c.paused ? "PAUSED" : "live", c.n, c.f[0], c.f[1], c.f[2], c.f[3], c.f[4], c.f[5], c.f[6], c.f[7], c.f[8]);
         c.n = 0;
     }
 }
