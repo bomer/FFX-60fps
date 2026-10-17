@@ -25,6 +25,11 @@ typedef void(__fastcall* walk_t)(void* list, void* edx);
 enum { MAX_SLOTS = 8, MAX_EV = 256 };
 struct Slot { uint8_t* mod; uint32_t size; uint8_t* entry; walk_t orig; char name[24]; };
 static Slot g_slots[MAX_SLOTS];
+// X2-MAG-027-MODE: 1 = hide start-tick events + end+1 for end-tick events; 2 (default) = end+1 only (the end phase,
+// e.g. the buffer free, still runs only on logic invocations; start phases may run on the render-only invocation first,
+// the event handlers guard their one-shot work with their own started flag +6). U 17/10/2026: Full Throttle sword/fire
+// still blinked with mode 1 (H: the hidden starts).
+static int g_mode = 2;
 static volatile LONG g_hidden = 0, g_extended = 0, g_walks = 0, g_kept_clock = 0;
 extern Row row_MAG027;
 
@@ -68,7 +73,7 @@ static void __fastcall h_walk(void* list, void* edx) {
         int w = 1;
         for (int i = 1; i < n; i++) {
             uint16_t* e = saved[i];
-            if ((int)e[1] == (int)(uint16_t)clock) { InterlockedIncrement(&g_hidden); changed = true; continue; }
+            if (g_mode == 1 && (int)e[1] == (int)(uint16_t)clock) { InterlockedIncrement(&g_hidden); changed = true; continue; }
             if ((int)e[2] == (int)(uint16_t)clock && e[2] != 0xFFFE) { e[2]++; ended[ne++] = e; InterlockedIncrement(&g_extended); }
             ev[w++] = e;
         }
@@ -135,8 +140,11 @@ static void on_unload(uint8_t* mod) {
 }
 
 static bool install() {
+    g_mode = config_row("X2-MAG-027-MODE", 2);
+    if (g_mode != 1) g_mode = 2;
     if (!magic_mods_subscribe("X2-MAG-027", on_load, on_unload)) return false;
-    log_line("  X2-MAG-027: cross-fade timeline walkers hooked per magic DLL load (start/end events on logic invocations only)");
+    log_line("  X2-MAG-027: cross-fade timeline walkers hooked per magic DLL load, mode %d (%s)", g_mode,
+             g_mode == 1 ? "start events hidden, end events drawn in range" : "end events drawn in range only");
     return true;
 }
 
