@@ -226,7 +226,7 @@ static void hexs(char* o, size_t cb, const uint8_t* p, int n) {
 }
 // Compact mode (X2-DIAG-PPPOPS-DUMP-MODE=1, default): per invocation one line per dumped op: calls, particles at age 0,
 // min / max age, and calls whose data dword at +0xA8 (KeLnsLp size) / +0x0 (KeLnsArnd texture) is 0 or the null record.
-struct Sum { LONG n, age0, amin, amax, z8f, za8, z0, z4; };
+struct Sum { LONG n, age0, amin, amax, z8f, za8, z0, z4; float i_sum, i_min, i_max; LONG i_zero; };
 static Sum   g_sum[2][MAXOPS];
 static int   g_dump_mode = 1;
 static uint8_t* g_null_rec = nullptr;             // 0x18E49B0, the empty texture record (FUN_00855830 test)
@@ -251,6 +251,23 @@ static void sum_call(int i, uint8_t* part, uint8_t*, uint8_t* opd) {
         if (!*(int*)(d + 4)) s.z4++;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
+// after the op ran: KeLnsLp intensity d+0x7C (FUN_00856910 writes it; KeLnsArnd draws with it through FUN_00855830)
+static void sum_after(int i, uint8_t* part, uint8_t* opd) {
+    int cls = 0;
+    uint8_t* prog = (uint8_t*)mag006_cur_step(&cls);
+    if (!prog) return;
+    char mod[64]; uint32_t off;
+    module_of(prog, mod, sizeof(mod), &off);
+    if (!strstr(mod, g_dump_mod)) return;
+    Sum& s = g_sum[render_only() ? 1 : 0][i];
+    __try {
+        float v = *(float*)(part + 0xA0 + **(int**)(opd + 0xC) + 0x7C);
+        if (s.n == 1 || v < s.i_min) s.i_min = v;
+        if (s.n == 1 || v > s.i_max) s.i_max = v;
+        s.i_sum += v;
+        if (v == 0.0f) s.i_zero++;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 static void sum_flush() {
     if (g_dump_lines >= 3000) return;
     for (int k = 0; k < 2; k++)
@@ -258,8 +275,9 @@ static void sum_flush() {
             Sum& s = g_sum[k][i];
             if (!s.n) continue;
             g_dump_lines++;
-            log_line("PPPSUM #%ld %s %-12s n %ld age0 %ld age %X..%X | 8F=0 %ld A8=0 %ld d0=0/null %ld d4=0 %ld", g_inv, k ? "R" : "L",
-                     g_name[i] + 3, s.n, s.age0, s.amin, s.amax, s.z8f, s.za8, s.z0, s.z4);
+            log_line("PPPSUM #%ld %s %-12s n %ld age0 %ld age %X..%X | 8F=0 %ld A8=0 %ld d0=0/null %ld d4=0 %ld | 7C after sum %.3f min %.3f max %.3f zero %ld",
+                     g_inv, k ? "R" : "L", g_name[i] + 3, s.n, s.age0, s.amin, s.amax, s.z8f, s.za8, s.z0, s.z4,
+                     (double)s.i_sum, (double)s.i_min, (double)s.i_max, s.i_zero);
             s = Sum{};
         }
 }
@@ -287,6 +305,7 @@ template <int I> static void __cdecl h_op(void* a, void* b, void* c) {
     note_pp(I);
     if (g_trace[I]) note_chain(I);
     g_orig[I](a, b, c);
+    if (g_dump_op[I] && g_dump_mode == 1) sum_after(I, (uint8_t*)a, (uint8_t*)c);
 }
 template <int... I> struct Tbl { static constexpr void* v[sizeof...(I)] = { (void*)&h_op<I>... }; };
 template <int N, int... I> struct Make : Make<N - 1, N - 1, I...> {};
