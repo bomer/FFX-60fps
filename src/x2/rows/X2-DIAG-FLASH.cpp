@@ -86,7 +86,7 @@ static void post() {
     Inv c = g_cur;
     g_cur = Inv{};
     g_inv++;
-    bool any = c.tint_n || c.bloom_n || c.at_a != 0.0f || c.at_b58 || c.at_b5c != 0.0f;
+    bool any = c.tint_a != 0.0f || c.at_a != 0.0f || c.at_b5c != 0.0f;   // visible tint or bloom only
     if (!any || g_lines >= 1500) return;
     g_lines++;
     log_line("FLASH #%ld %s | tint set %d a %.3f | bloom set %d arg %d | at HD frame x%d: tint a %.3f lock %d armed %d bloom %d/%d lvl %.3f",
