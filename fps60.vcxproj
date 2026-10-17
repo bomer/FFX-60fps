@@ -111,6 +111,7 @@
     <ClCompile Include="src\x\rows\ppp_pause.cpp" />
     <ClCompile Include="src\x\rows\W2A-002.cpp" />
     <ClCompile Include="src\x\rows\CLK-002.cpp" />
+    <ClCompile Include="src\x\rows\CLK-013.cpp" />
     <ClCompile Include="src\x\rows\MAG-009.cpp" />
     <ClCompile Include="src\x\rows\MAG-016.cpp" />
     <ClCompile Include="src\x\rows\LOOP-005.cpp" />

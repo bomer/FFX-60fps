@@ -10,6 +10,7 @@ static Row* g_rows[] = {
     &row_MAG008,
     &row_W2A002,
     &row_CLK002,
+    &row_CLK013,
     &row_LOOP005,
     &row_LOOP004,
     &row_MAG006,

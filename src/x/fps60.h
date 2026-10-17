@@ -130,6 +130,7 @@ struct Row {
 };
 extern Row row_MAG008;                           // rows/MAG-008.cpp
 extern Row row_MAG006;                           // rows/MAG-006.cpp
+extern Row row_CLK013;                           // rows/CLK-013.cpp (stock pacing in SyncData cutscenes)
 extern Row row_W2A002;                           // rows/W2A-002.cpp
 extern Row row_CLK002;                           // rows/CLK-002.cpp
 extern Row row_MAG009;                           // rows/MAG-009.cpp
