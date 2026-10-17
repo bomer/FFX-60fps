@@ -45,6 +45,7 @@ static Row* g_rows[] = {
     &row_QOLSENSOR,
     &row_QOLAP,
     &row_QOLRETRY,
+    &row_QOLSAVEICON,
     &row_CFGMENU,                                // after the rows it switches
     &row_FX010,
     &row_DIAG_BTLSIG,

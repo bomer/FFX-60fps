@@ -107,6 +107,8 @@ static int  get_turbo()   { return row_get(row_DEVTURBO); }
 static void set_turbo(int v) { row_set(row_DEVTURBO, v == 0); }
 static int  get_voice()   { return row_get(row_CLK013); }
 static void set_voice(int v) { row_set(row_CLK013, v == 0); }
+static int  get_saveicon() { return row_QOLSAVEICON.on ? 1 : 0; }                         // ON = stock chocobo shown
+static void set_saveicon(int v) { row_set(row_QOLSAVEICON, v == 1); }
 
 struct Opt {                                        // T_* = text_strings.h ids (text/strings.json, per language)
     int  label;
@@ -128,6 +130,7 @@ static const Opt k_opts[] = {
     { T_L_RESET,  { -1, -1 }, { T_H_RESET_ON, T_H_RESET_OFF }, 2, get_reset, set_reset },
     { T_L_TURBO,  { -1, -1 }, { T_H_TURBO_ON, T_H_TURBO_OFF }, 2, get_turbo, set_turbo },
     { T_L_VOICE,  { -1, -1 }, { T_H_VOICE_ON, T_H_VOICE_OFF }, 2, get_voice, set_voice },     // CLK-013 (opt-in)
+    { T_L_SAVEICON, { -1, -1 }, { T_H_SAVEICON_ON, T_H_SAVEICON_OFF }, 2, get_saveicon, set_saveicon },   // QOL-SAVEICON
 };
 enum { N_OPTS = sizeof(k_opts) / sizeof(k_opts[0]) };
 
@@ -253,6 +256,7 @@ static void write_ini() {
     config_write("rows", "QOL-RETRY", on01[get_retry()]);
     config_write("rows", "DEV-TURBO", on01[get_turbo()]);
     config_write("rows", "CLK-013", on01[get_voice()]);
+    config_write("rows", "QOL-SAVEICON", get_saveicon() ? "1" : "0");
     // soft_reset holds the chord: keep it when on, unless it is the off value
     char b[96];
     config_str("fps60", "soft_reset", b, sizeof(b), "");
@@ -402,6 +406,6 @@ static void stop() {
 
 Row row_CFGMENU = {
     "CFG-MENU",
-    "mod options (60 FPS, Smooth, Sensor, AP, Non-Fighter AP, Retry, Soft Reset, Turbo, Voice Sync) as rows of the game's Config page",
+    "mod options (60 FPS, Smooth, Sensor, AP, Non-Fighter AP, Retry, Soft Reset, Turbo, Voice Sync, Autosave Chocobo) as rows of the game's Config page",
     1, install, pre, nullptr, 0, stop
 };
