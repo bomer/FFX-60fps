@@ -260,7 +260,7 @@ static void ul_unload(uint8_t* base) {
 }
 
 // X2-DIAG-PPPOPS: the program of the step running now and its caller class (game thread), plus a per-step callback
-// (program, caller class, particles on +0x30 before / after, return value).
+// (program, caller class, particles on +0x30 before / after, return value), also at the step start with after == -1.
 static step_note_fn g_step_note = nullptr;
 void* mag006_cur_step(int* cls) { if (cls) *cls = g_cur_cls; return g_cur_prog; }
 void  mag006_set_step_note(step_note_fn fn) { g_step_note = fn; }
@@ -276,7 +276,8 @@ static int __cdecl h_ppp_step(void* prog, uint32_t flags) {
     void* ret = _ReturnAddress();
     void* outer = g_cur_prog; int outer_cls = g_cur_cls;
     g_cur_prog = prog; g_cur_cls = in_image(ret) ? 2 : 1;
-    int before = g_step_note ? count_parts(prog) : 0;
+    int before = 0;
+    if (g_step_note) { before = count_parts(prog); g_step_note(prog, g_cur_cls, before, -1, 0); }   // -1: step starts
     int r = ppp_step_body(prog, flags, ret);
     if (g_step_note) g_step_note(prog, g_cur_cls, before, count_parts(prog), r);
     g_cur_prog = outer; g_cur_cls = outer_cls;

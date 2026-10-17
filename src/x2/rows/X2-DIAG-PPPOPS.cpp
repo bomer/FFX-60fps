@@ -7,6 +7,7 @@
 // table), found from the record that names "pppDrawShapeCamera" (outer repo re/ledger/DRAWCAM.md D1, S).
 #include "../x2.h"
 #include <string.h>
+#include <stdio.h>
 
 namespace x2 {
 
@@ -82,15 +83,6 @@ static void note_pp(int i) {
     e->n[k]++;
     if (k && *g_pause) e->np++;
 }
-static void step_note(void* prog, int cls, int before, int after, int ret) {
-    StC* e = st_slot(prog, cls);
-    if (!e) return;
-    int k = render_only() ? 1 : 0;
-    e->n[k]++; e->pb[k] += before; e->pa[k] += after;
-    if (ret) e->end[k]++;
-    if (!after) e->pz[k]++;
-}
-static bool low(LONG r, LONG l) { return l >= 20 && r * 5 < l * 4; }
 static void module_of(void* p, char* mod, size_t cb, uint32_t* off) {
     strncpy_s(mod, cb, "?", _TRUNCATE); *off = 0;
     HMODULE hm = nullptr;
@@ -100,6 +92,60 @@ static void module_of(void* p, char* mod, size_t cb, uint32_t* off) {
         *off = (uint32_t)((uint8_t*)p - (uint8_t*)hm);
     }
 }
+// X2-DIAG-PPPOPS-TRACE (default "pppKeShpTail2X"): one line per step of a DLL-called program that ever called a listed
+// op: invocation kind, particles before / after, the change since its previous step ended (particles made outside its
+// steps), return value, and every op called in that step with its count (U 17/10/2026: magic_0681 slot 0 calls
+// pppKeShpTail2X 75 times on logic and 50 on render-only steps and gains ~87 particles between steps). Max 4000 lines.
+static bool  g_tr_op[MAXOPS];
+static LONG  g_snap[4][MAXOPS];
+static int   g_depth = 0;
+struct TrP { void* prog; int last; };
+static TrP   g_trp[16];
+static int   g_ntrp = 0;
+static LONG  g_trlines = 0;
+static LONG  g_inv = 0;
+static void step_trace(void* prog, int cls, int before, int after, int ret, const LONG* snap) {
+    if (cls != 1) return;
+    TrP* t = nullptr;
+    for (int i = 0; i < g_ntrp; i++) if (g_trp[i].prog == prog) t = &g_trp[i];
+    if (!t) {
+        bool hit = false;
+        for (int i = 0; i < g_n && !hit; i++) if (g_tr_op[i] && g_paused[i] + g_live[i] != snap[i]) hit = true;
+        if (!hit || g_ntrp >= 16) return;
+        t = &g_trp[g_ntrp++];
+        t->prog = prog; t->last = before;
+    }
+    if (g_trlines >= 4000) return;
+    g_trlines++;
+    char buf[1024]; int o = 0;
+    for (int i = 0; i < g_n && o < 900; i++) {
+        LONG d = g_paused[i] + g_live[i] - snap[i];
+        if (d) o += _snprintf_s(buf + o, sizeof(buf) - o, _TRUNCATE, " %s %ld", g_name[i] + 3, d);
+    }
+    buf[o] = 0;
+    char mod[64]; uint32_t off;
+    module_of(prog, mod, sizeof(mod), &off);
+    log_line("PPPTRACE #%ld %s %s+0x%X parts %d -> %d (gap %+d) ret %d |%s", g_inv, render_only() ? "R" : "L", mod, off,
+             before, after, before - t->last, ret, buf);
+    t->last = after;
+}
+static void step_note(void* prog, int cls, int before, int after, int ret) {
+    if (after < 0) {
+        if (g_depth < 4) for (int i = 0; i < g_n; i++) g_snap[g_depth][i] = g_paused[i] + g_live[i];
+        g_depth++;
+        return;
+    }
+    g_depth--;
+    if (g_depth >= 0 && g_depth < 4) step_trace(prog, cls, before, after, ret, g_snap[g_depth]);
+    if (g_depth < 0) g_depth = 0;
+    StC* e = st_slot(prog, cls);
+    if (!e) return;
+    int k = render_only() ? 1 : 0;
+    e->n[k]++; e->pb[k] += before; e->pa[k] += after;
+    if (ret) e->end[k]++;
+    if (!after) e->pz[k]++;
+}
+static bool low(LONG r, LONG l) { return l >= 20 && r * 5 < l * 4; }
 static const char* CLS[4] = { "none", "DLL", "EXE", "field" };
 static void report_pp() {
     for (int j = 0; j < HST; j++) {
@@ -197,6 +243,16 @@ static bool install() {
         if (!strcmp(g_name[i], key) && sig_match(g_fn[i] + 0x224, "83 3D ?? ?? ?? ?? 00 75"))
             g_pause = (volatile int32_t*)abs_operand("particle pause flag", g_fn[i] + 0x226);
     if (!g_pause) { log_line("  X2-DIAG-PPPOPS: pause flag not found - off"); return false; }
+    {
+        char tq[256];
+        config_str("rows", "X2-DIAG-PPPOPS-TRACE", tq, sizeof(tq), "pppKeShpTail2X");
+        for (int i = 0; i < g_n; i++) {
+            const char* hit = strstr(tq, g_name[i]);
+            size_t L = strlen(g_name[i]);
+            while (hit && ((hit > tq && hit[-1] != ' ' && hit[-1] != ',') || (hit[L] && hit[L] != ' ' && hit[L] != ','))) hit = strstr(hit + 1, g_name[i]);
+            g_tr_op[i] = hit != nullptr;
+        }
+    }
     char tr[256];
     config_str("rows", "X2-DIAG-PPPOPS-CALLERS", tr, sizeof(tr), "pppKeShpTail3X pppKeLnsFls");
     for (int i = 0; i < g_n; i++) {
@@ -223,6 +279,7 @@ static void pre() {
 }
 
 static void post() {
+    g_inv++;
     static DWORD last = 0;
     DWORD now = GetTickCount();
     if (now - last < 10000) return;
