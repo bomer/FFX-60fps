@@ -100,6 +100,14 @@ static int g_diff_phase = 0;                        // 1 wait fresh state 1, 2 w
 // battle file buffer DAT_0112a9a8 (outside .data, D 18/10/2026 03:09:52), found at the fresh copy.
 struct DiffRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* end; uint8_t* ok; };   // ok: per 4 KB page, 1 = in both copies
 static DiffRgn g_rgn[2];
+// Transformation window (D 18/10/2026 03:21: the chr-name buffer at Ghidra VA 0x012FC5C4 held "130/m130" at the fresh
+// state 1 and "175/m175" at the retry's): a .data copy every 15 invocations of the lost attempt; when that buffer changes,
+// every dword that changed since the previous copy is marked. The report lists carried dwords that were marked.
+enum { WATCH_GVA = 0x012FC5C4, WIN_INV = 15 };
+static uint8_t* g_prev = nullptr;
+static uint32_t* g_tbits = nullptr;
+static uint64_t g_watch = 0;
+static int g_tick = 0;
 
 static uint8_t* diff_buf(uint32_t len) { return (uint8_t*)VirtualAlloc(nullptr, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); }
 static void diff_free(DiffRgn& r) {
@@ -122,7 +130,8 @@ static bool diff_alloc() {
     }
     if (!d.len) return false;
     d.fresh = diff_buf(d.len); d.end = diff_buf(d.len); d.ok = diff_buf(d.len / 0x1000 + 1);
-    if (!d.fresh || !d.end || !d.ok) {
+    g_prev = diff_buf(d.len); g_tbits = (uint32_t*)diff_buf(d.len / 32 + 4);
+    if (!d.fresh || !d.end || !d.ok || !g_prev || !g_tbits) {
         log_line("QOL-RETRY-DIFF: no memory for 2 x 0x%X bytes - off", d.len);
         diff_free(d);
         g_diff = 0;
@@ -130,18 +139,6 @@ static bool diff_alloc() {
     }
     log_line("QOL-RETRY-DIFF: watching gva 0x%08X..0x%08X", rt_to_gva_exe(d.p), rt_to_gva_exe(d.p) + d.len);
     return true;
-}
-
-// The first 64 KB of the battle file buffer DAT_0112a9a8.
-static void diff_heap_find() {
-    DiffRgn& h = g_rgn[1];
-    diff_free(h);
-    uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);   // DAT_0112a9a8: battle file buffer (MsBattleSetupEncounter)
-    if (!file) { log_line("QOL-RETRY-DIFF: no battle file buffer - not watched"); return; }
-    h.p = file; h.len = 0x10000;                       // the allocation walk found no span (D 03:20); the copy is guarded
-    h.fresh = diff_buf(h.len); h.end = diff_buf(h.len); h.ok = diff_buf(h.len / 0x1000 + 1);
-    if (!h.fresh || !h.end || !h.ok) { log_line("QOL-RETRY-DIFF: no memory for the file copy"); diff_free(h); return; }
-    log_line("QOL-RETRY-DIFF: watching the battle file buffer %p (+0x%X)", file, h.len);
 }
 
 // The heap span can be decommitted between the copies (D 18/10/2026 03:16:11: the end copy faulted, the row went off
@@ -206,6 +203,18 @@ static void diff_report() {
         log_line("QOL-RETRY-DIFF: %s: %u dwords differ, %u carried from the lost attempt in %u ranges",
                  k == 0 ? ".data" : "heap", changed, carried, ranges);
         if (f) fprintf(f, "%s: %u dwords differ, %u carried in %u ranges\n", k == 0 ? ".data" : "heap", changed, carried, ranges);
+        if (k == 0 && g_tbits) {                     // carried and changed in a chr-name window of the lost attempt
+            uint32_t hits = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                if (!(g_tbits[i >> 5] & (1u << (i & 31)))) continue;
+                if (cur[i] == fr[i] || cur[i] != en[i]) continue;
+                hits++;
+                uint32_t gva = rt_to_gva_exe(r.p + i * 4);
+                if (f) fprintf(f, "TRANS gva 0x%08X fresh %08X retry %08X\n", gva, fr[i], cur[i]);
+                if (hits <= 200) log_line("QOL-RETRY-DIFF: TRANS gva 0x%08X fresh %08X retry %08X", gva, fr[i], cur[i]);
+            }
+            log_line("QOL-RETRY-DIFF: %u carried dwords changed in a chr-name window", hits);
+        }
     }
     if (f) fclose(f);
     log_line("QOL-RETRY-DIFF: battle file buffer now %p; all ranges in %s", file, path);
@@ -235,6 +244,29 @@ static void diff_copy(bool fresh) {
     }
 }
 
+static char printable(char c) { return (uint8_t)c < 0x20 || (uint8_t)c > 0x7E ? '.' : c; }
+
+static void diff_window() {                         // phase 2, each invocation
+    if (++g_tick % WIN_INV) return;
+    DiffRgn& d = g_rgn[0];
+    uint64_t w = *(volatile uint64_t*)(exe_base() + (WATCH_GVA - 0x400000));
+    if (w != g_watch) {
+        const uint32_t* cur = (const uint32_t*)d.p;
+        const uint32_t* pv = (const uint32_t*)g_prev;
+        uint32_t n = d.len / 4, marked = 0;
+        for (uint32_t i = 0; i < n; i++)
+            if (cur[i] != pv[i]) { g_tbits[i >> 5] |= 1u << (i & 31); marked++; }
+        char a[9], b[9];
+        memcpy(a, &g_watch, 8); memcpy(b, &w, 8);
+        for (int i = 0; i < 8; i++) { a[i] = printable(a[i]); b[i] = printable(b[i]); }
+        a[8] = b[8] = 0;
+        log_line("QOL-RETRY-DIFF: chr name \"%s\" -> \"%s\" at invocation %d: %u dwords changed in the window",
+                 a, b, g_tick, marked);
+        g_watch = w;
+    }
+    memcpy(g_prev, d.p, d.len);
+}
+
 static void diff_step_body() {
     uint8_t st = *g_a8e0;
     if (g_diff_phase == 25) {                       // the prompt opened last invocation: end copy, apart from the prompt
@@ -242,10 +274,15 @@ static void diff_step_body() {
         g_diff_phase = 3;
         log_line("QOL-RETRY-DIFF: end copy at the prompt");
     } else if (g_diff_phase == 1 && st == 1) {
-        diff_heap_find();
         diff_copy(true);
+        memcpy(g_prev, g_rgn[0].p, g_rgn[0].len);
+        memset(g_tbits, 0, g_rgn[0].len / 32 + 4);
+        g_watch = *(volatile uint64_t*)(exe_base() + (WATCH_GVA - 0x400000));
+        g_tick = 0;
         g_diff_phase = 2;
         log_line("QOL-RETRY-DIFF: fresh copy at state 1");
+    } else if (g_diff_phase == 2) {
+        diff_window();
     } else if (g_diff_phase == 4 && st == 1) {
         g_diff_phase = 0;
         diff_report();
