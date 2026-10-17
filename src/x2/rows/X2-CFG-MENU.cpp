@@ -26,7 +26,7 @@
 
 namespace x2 {
 
-extern Row row_CFGMENU, row_MENU002, row_SR003, row_DEVTURBO, row_CHR002, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003;
+extern Row row_CFGMENU, row_MENU002, row_SR003, row_DEVTURBO, row_CHR002, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_VSYNC;
 
 #pragma pack(push, 1)
 struct CfgRow {                                    // CFGX2-005
@@ -66,7 +66,7 @@ struct Opt {
     void (*set)(bool on);                          // runtime (installed rows only)
     const char* sect;                              // ini
     const char* key;
-    int  want;                                     // the saved choice (shown when the runtime state cannot follow)
+    int  want;                                     // the code default at first, then the saved choice
     bool (*live)();                                // the runtime state follows the choice
 };
 
@@ -88,6 +88,9 @@ static bool live_turbo()  { return row_DEVTURBO.installed != 0; }
 static int  get_idle()    { return row_CHR002.on != 0; }
 static void set_idle(bool on) { row_set(row_CHR002, on); }
 static bool live_idle()   { return row_CHR002.installed != 0; }
+static int  get_vsync()   { return row_VSYNC.on != 0; }
+static void set_vsync(bool on) { row_set(row_VSYNC, on); }
+static bool live_vsync()  { return row_VSYNC.installed != 0; }
 
 static Opt g_opts[] = {
     { T_L_FPS,    T_H_FPS_ON,    T_H_FPS_OFF,    get_fps,    set_fps,    "x2",   "pacing",       1, live_always },
@@ -96,6 +99,7 @@ static Opt g_opts[] = {
     { T_L_RESET,  T_H_RESET_ON,  T_H_RESET_OFF,  get_reset,  set_reset,  "x2",   "soft_reset",   1, live_reset },
     { T_L_TURBO,  T_H_TURBO_ON,  T_H_TURBO_OFF,  get_turbo,  set_turbo,  "rows", "X2-DEV-TURBO", 1, live_turbo },
     { T_L_IDLE,   T_H_IDLE_ON,   T_H_IDLE_OFF,   get_idle,   set_idle,   "rows", "X2-CHR-002",   1, live_idle },
+    { T_L_VSYNC,  T_H_VSYNC_ON,  T_H_VSYNC_OFF,  get_vsync,  set_vsync,  "rows", "X2-VSYNC",     0, live_vsync },
 };
 enum { N_OPTS = sizeof(g_opts) / sizeof(g_opts[0]) };
 
@@ -227,7 +231,7 @@ static bool install() {
         r.apply = row_apply;
         Opt& o = g_opts[i];
         o.want = !strcmp(o.key, "soft_reset") ? config_row("X2-SR-003", 1)
-               : !strcmp(o.key, "pacing") ? g_cfg.pacing : config_row(o.key, 1);
+               : !strcmp(o.key, "pacing") ? g_cfg.pacing : config_row(o.key, o.want);
     }
     x2_text(0);                                     // resolve the language pointer now (sig scan), not on the first draw
     log_line("  X2-CFG-MENU: enter gva=0x%08X (0x00788920), rows gva=0x%08X (0x016D5F40) count gva=0x%08X (0x016D5F48), "
@@ -254,7 +258,7 @@ fail:
 
 Row row_CFGMENU = {
     "X2-CFG-MENU",
-    "the mod's options (60 FPS, Smooth Motion, 60 FPS Menu, Soft Reset, Turbo, Idle Motion) on the main-menu Config page",
+    "the mod's options (60 FPS, Smooth Motion, 60 FPS Menu, Soft Reset, Turbo, Idle Motion, V-Sync) on the main-menu Config page",
     1, install, pre, nullptr, 0
 };
 

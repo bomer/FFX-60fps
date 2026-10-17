@@ -5,6 +5,11 @@
 // after the game logic. Every ~5 s: presents per second, interval min/avg/max, intervals over 20 ms, the SyncInterval
 // and Flags values seen. Present is found through a throwaway device + swap chain on a hidden window (the vtable is
 // shared by every swap chain), entry-hooked with MinHook; the game's own swap chain is not touched otherwise.
+// X2-VSYNC (default 0, own row in this file: one Present hook serves both): the game presents with SyncInterval 0 (D
+// 21:46 and every X2-DIAG-PRESENT line since), so frames are not tied to the refresh. U 18/10/2026: tearing ("split
+// line") in FFX-2 on the Steam Deck, not on Windows; U 13/10 Windows: a "ghost" double image when walking left/right
+// (tearing). While the row is on, Present gets SyncInterval 1 (wait for the next refresh). Off at startup: the hook is
+// still not installed (Config menu choice applies at the next start).
 #include "../x2.h"
 #include <d3d11.h>
 #include <dxgi.h>
@@ -26,9 +31,12 @@ static CRITICAL_SECTION g_cs;
 // X2-PRESENT-VSYNC (test, default 0): the game presents with SyncInterval 0 (D fps60x2.log 21:46: no V-Sync, so frames
 // tear; walking left/right shows a "ghost" double image). 1 = pass SyncInterval 1 (wait for the next refresh).
 static UINT g_force_sync = 0;
-extern Row row_DIAGPRESENT;
+extern Row row_DIAGPRESENT, row_VSYNC;
+static bool g_hooked = false, g_stats_ready = false;
 
 static HRESULT STDMETHODCALLTYPE h_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
+    UINT out = row_VSYNC.on ? 1 : g_force_sync ? g_force_sync : sync;
+    if (!row_DIAGPRESENT.on || !g_stats_ready) return g_present_orig(sc, out, flags);
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     EnterCriticalSection(&g_cs);
@@ -45,7 +53,7 @@ static HRESULT STDMETHODCALLTYPE h_present(IDXGISwapChain* sc, UINT sync, UINT f
     else if (g_sync_seen != sync) g_sync_mixed = true;
     g_flags_seen |= flags;
     LeaveCriticalSection(&g_cs);
-    return g_present_orig(sc, g_force_sync ? g_force_sync : sync, flags);
+    return g_present_orig(sc, out, flags);
 }
 
 // Present's address from a throwaway swap chain (DXGI's vtable slot 8, shared by all swap chains of the process).
@@ -80,16 +88,30 @@ static void* find_present() {
     return p;
 }
 
+static bool present_hook() {
+    if (g_hooked) return true;
+    g_present = find_present();
+    if (!g_present) return false;
+    if (!hook_entry("X2 Present", g_present, (void*)&h_present, (void**)&g_present_orig)) return false;
+    g_hooked = true;
+    log_line("  X2 Present: IDXGISwapChain::Present at %p hooked", g_present);
+    return true;
+}
+
 static bool install() {
     InitializeCriticalSection(&g_cs);
     QueryPerformanceFrequency(&g_f);
     QueryPerformanceCounter(&g_win);
     g_force_sync = (UINT)config_row("X2-PRESENT-VSYNC", 0);
-    g_present = find_present();
-    if (!g_present) return false;
-    if (!hook_entry("X2-DIAG-PRESENT", g_present, (void*)&h_present, (void**)&g_present_orig)) return false;
-    log_line("  X2-DIAG-PRESENT: IDXGISwapChain::Present at %p hooked (%s)", g_present,
-             g_force_sync ? "X2-PRESENT-VSYNC: SyncInterval forced" : "observe only");
+    g_stats_ready = true;
+    if (!present_hook()) return false;
+    log_line("  X2-DIAG-PRESENT: %s", g_force_sync ? "X2-PRESENT-VSYNC: SyncInterval forced" : "observe only");
+    return true;
+}
+
+static bool install_vsync() {
+    if (!present_hook()) return false;
+    log_line("  X2-VSYNC: Present with SyncInterval 1 while on (the game passes 0)");
     return true;
 }
 
@@ -115,6 +137,12 @@ Row row_DIAGPRESENT = {
     "X2-DIAG-PRESENT",
     "diagnostic: IDXGISwapChain::Present rate and interval (presentation evenness)",
     0, install, nullptr, post, 0
+};
+
+Row row_VSYNC = {
+    "X2-VSYNC",
+    "V-Sync: frames wait for the screen refresh (no tearing; the game presents without it)",
+    0, install_vsync, nullptr, nullptr, 0
 };
 
 } // namespace x2
