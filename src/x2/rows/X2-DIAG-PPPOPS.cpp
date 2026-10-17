@@ -40,8 +40,23 @@ static void note_chain(int i) {
         if (g_ch[j].op == c.op && g_ch[j].paused == c.paused && !memcmp(g_ch[j].f, c.f, sizeof(c.f))) { g_ch[j].n++; return; }
     if (g_nch < MAXCH) { c.n = 1; g_ch[g_nch++] = c; }
 }
+// Per (op, program) counts: the current program is [0x01CF5A44] (Ppp_ProgramStep 0x7FEE2E stores it before the group
+// loop). Logged every 10 s for pairs whose paused calls fall below 80 % of their live calls (live >= 40): the program
+// that draws less on paused steps (U 17/10/2026: Full Throttle glow blink, F11 fixes it; pppKeTh paused 105 / live 325).
+static void* volatile* g_curprog = (void* volatile*)0x01CF5A44;   // rebased at install
+struct PP { void* prog; int op; LONG p, l; };
+enum { MAXPP = 256 };
+static PP g_pp[MAXPP];
+static int g_npp = 0;
+static void note_pp(int i, bool paused) {
+    void* pr = *g_curprog;
+    for (int j = 0; j < g_npp; j++)
+        if (g_pp[j].prog == pr && g_pp[j].op == i) { if (paused) g_pp[j].p++; else g_pp[j].l++; return; }
+    if (g_npp < MAXPP) { g_pp[g_npp] = { pr, i, paused ? 1 : 0, paused ? 0 : 1 }; g_npp++; }
+}
 template <int I> static void __cdecl h_op(void* a, void* b, void* c) {
     InterlockedIncrement(*g_pause ? &g_paused[I] : &g_live[I]);
+    note_pp(I, *g_pause != 0);
     if (g_trace[I]) note_chain(I);
     g_orig[I](a, b, c);
 }
@@ -106,6 +121,14 @@ static bool install() {
         if (!strcmp(g_name[i], key) && sig_match(g_fn[i] + 0x224, "83 3D ?? ?? ?? ?? 00 75"))
             g_pause = (volatile int32_t*)abs_operand("particle pause flag", g_fn[i] + 0x226);
     if (!g_pause) { log_line("  X2-DIAG-PPPOPS: pause flag not found - off"); return false; }
+    // current program pointer: Ppp_ProgramStep 0x7FEE2E `MOV [0x01CF5A44],ESI` (89 35 abs)
+    {
+        uint8_t* st = sig_find("X2-DIAG-PPPOPS current program store",
+            "F6 45 0C 10 89 35 ?? ?? ?? ?? 74 23 33 FF 39 7E 14", 0x7FEE2A);
+        uint8_t* cp = st ? abs_operand("current program", st + 6) : nullptr;
+        if (!cp) { log_line("  X2-DIAG-PPPOPS: current program store not found - off"); return false; }
+        g_curprog = (void* volatile*)cp;
+    }
     char tr[256];
     config_str("rows", "X2-DIAG-PPPOPS-CALLERS", tr, sizeof(tr), "pppKeShpTail3X pppKeLnsFls");
     for (int i = 0; i < g_n; i++) {
@@ -142,6 +165,20 @@ static void post() {
         g_last_live[i] = g_live[i];
         log_line("X2-DIAG-PPPOPS: %-30s gva=0x%08X  paused %ld  live %ld (10 s)", g_name[i], rt_to_gva(g_fn[i]), p, l);
     }
+    for (int j = 0; j < g_npp; j++) {
+        PP& q = g_pp[j];
+        if (q.l >= 40 && q.p * 5 < q.l * 4) {
+            char mod[64] = "?"; HMODULE hm = nullptr; uint32_t off = 0;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)q.prog, &hm) && hm) {
+                char path[MAX_PATH]; GetModuleFileNameA(hm, path, MAX_PATH);
+                const char* b = strrchr(path, '\'); strncpy_s(mod, b ? b + 1 : path, _TRUNCATE);
+                off = (uint32_t)((uint8_t*)q.prog - (uint8_t*)hm);
+            }
+            log_line("X2-DIAG-PPPOPS prog %p (%s+0x%X) %-24s paused %ld live %ld", q.prog, mod, off, g_name[q.op], q.p, q.l);
+        }
+    }
+    g_npp = 0;
     for (int j = 0; j < g_nch; j++) {
         Chain& c = g_ch[j];
         if (!c.n) continue;
