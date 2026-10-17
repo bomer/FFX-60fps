@@ -35,6 +35,8 @@ bool smooth_interp(const float* a, const float* b, float t, float cut_dist, floa
 // Same for a view matrix (world -> view): both are inverted, interpolated as camera transforms (eye
 // position + orientation), and the result is inverted back. cut_dist applies to the eye.
 bool smooth_interp_view(const float* a, const float* b, float t, float cut_dist, float* out);
+// Eye distance and turn angle (degrees) between two view matrices. False if either is not invertible.
+bool smooth_view_step(const float* a, const float* b, float* dist, float* deg);
 // 4x4 helpers, row-vector convention (p' = p . M, translation in row 3).
 bool smooth_affine_inverse(const float* m, float* out);   // false if not affine or singular
 void smooth_mul(const float* a, const float* b, float* out); // out = a . b (out may not alias)

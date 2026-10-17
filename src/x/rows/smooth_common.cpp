@@ -183,3 +183,24 @@ bool smooth_interp_view(const float* a, const float* b, float t, float cut_dist,
     memcpy(out, o, 64);
     return true;
 }
+
+bool smooth_view_step(const float* a, const float* b, float* dist, float* deg) {
+    float ia[16], ib[16];
+    if (!smooth_affine_inverse(a, ia) || !smooth_affine_inverse(b, ib)) return false;
+    float d[3] = { ib[12] - ia[12], ib[13] - ia[13], ib[14] - ia[14] };
+    *dist = sqrtf(dot3(d, d));
+    float A[9], B[9];
+    for (int r = 0; r < 3; r++) {
+        float la = sqrtf(dot3(ia + r * 4, ia + r * 4)), lb = sqrtf(dot3(ib + r * 4, ib + r * 4));
+        if (!(la > 1e-6f) || !(lb > 1e-6f)) return false;
+        for (int c = 0; c < 3; c++) { A[r * 3 + c] = ia[r * 4 + c] / la; B[r * 3 + c] = ib[r * 4 + c] / lb; }
+    }
+    if ((det3(ia) < 0.0f) != (det3(ib) < 0.0f)) { *deg = 180.0f; return true; }
+    if (det3(ia) < 0.0f) for (int c = 0; c < 3; c++) { A[6 + c] = -A[6 + c]; B[6 + c] = -B[6 + c]; }
+    float qa[4], qb[4];
+    mat_to_quat(A, qa);
+    mat_to_quat(B, qb);
+    float c = fabsf(qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3]);
+    *deg = 2.0f * acosf(c > 1.0f ? 1.0f : c) * 57.29578f;
+    return true;
+}

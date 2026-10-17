@@ -23,6 +23,9 @@ static fovcommit_t g_fovcommit = nullptr;    // MsCommitCameraFovAspect (FOV/asp
 static float*     g_fovblk = nullptr;        // camera blocks 0x01137000 (stride 0x1C0)
 static const int  k_fovoff[3] = { 0x10, 0x14, 0x1C };
 static LONG       g_fov_interp = 0, g_fov_cut = 0;
+static int        g_jump = 1;                // SMOOTH-001-JUMPCUT: a step far above the previous tick's step is a cut
+static const float k_jump_ratio = 4.0f, k_jump_dist = 20.0f, k_jump_deg = 10.0f;
+static LONG       g_jump_cut = 0;
 static int        g_camlog = 0;              // SMOOTH-001-CAMLOG: log the view per finalize during LAB-001's cast window
 bool lab001_mot_window();
 static commit_t   g_commit_tramp = nullptr;   // CAMLOG: commit hook (every committed view, any caller)
@@ -68,6 +71,9 @@ struct CamHist {
     float pend[16];      // sample of the current logic invocation
     int   pend_tag;
     bool  has_pend;
+    bool  pend_cut;      // this tick was drawn as a cut (its step is not a motion reference)
+    float step_d, step_a; // eye distance / turn (degrees) from the tick before prev to prev
+    bool  step_valid;
 };
 static CamHist g_h[3];
 static int   g_kind = INV_STOCK;
@@ -103,6 +109,7 @@ static void on_call(int vp) {
     g_logic_calls++;
     if (tag == 1 && vp == 1) return;                          // special commit paths (MsCommitCameraFovAspect)
     if (!h.valid || h.tag != tag) { g_skip_hist++; return; }
+    h.pend_cut = true;                                        // cleared below once the frame is interpolated
     // FOV: a big jump is a camera cut (no in-between frame); otherwise draw the FOV half-way too, so zoom and
     // movement change on the same frames (the view alone leads the zoom by half a tick: Mental Break shift/zoom).
     bool fov_mid = false;
@@ -116,6 +123,17 @@ static void on_call(int vp) {
             if (a != b) fov_mid = true;
         }
     }
+    // Jump: the camera moved or turned far more than in the previous tick (a cut below the 500-unit / 60-degree
+    // limits, U 17/10: field cutscene cut drew one in-between frame of two shots).
+    float sd, sa;
+    if (g_jump && h.step_valid && smooth_view_step(h.prev, g_view, &sd, &sa) &&
+        ((sd > k_jump_dist && sd > k_jump_ratio * h.step_d) || (sa > k_jump_deg && sa > k_jump_ratio * h.step_a))) {
+        LONG n = InterlockedIncrement(&g_jump_cut);
+        if (n <= 200)
+            log_line("SMOOTH-001: jump cut vp %d src %d: step %.1f units %.1f deg (previous tick %.1f units %.1f deg)",
+                     vp, tag, sd, sa, h.step_d, h.step_a);
+        return;
+    }
     float out[16];
     if (!smooth_interp_view(h.prev, g_view, 0.5f, SMOOTH_CUT_DIST, out)) { InterlockedIncrement(&g_st.interp_cut); return; }
     if (fov_mid) {
@@ -124,6 +142,7 @@ static void on_call(int vp) {
         for (int i = 0; i < 3; i++) *(float*)((uint8_t*)blk + k_fovoff[i]) = cur[i];
         InterlockedIncrement(&g_fov_interp);
     }
+    h.pend_cut = false;
     if (memcmp(out, g_view, 64) == 0) return;
     write_view(out, tag);
     InterlockedIncrement(&g_st.interp);
@@ -167,6 +186,7 @@ static void pre() {
     g_blk_first = true;
     for (int i = 0; i < 3; i++) {
         g_h[i].has_pend = false;
+        g_h[i].pend_cut = false;
         if (g_kind == INV_STOCK) g_h[i].valid = false;
     }
 }
@@ -175,7 +195,8 @@ static void post() {
     if (g_kind == INV_LOGIC || g_kind == INV_BACKLOG) {
         for (int i = 0; i < 3; i++) {
             CamHist& h = g_h[i];
-            if (!h.has_pend) { h.valid = false; continue; }   // viewport not drawn this tick: history broken
+            if (!h.has_pend) { h.valid = false; h.step_valid = false; continue; }   // viewport not drawn this tick: history broken
+            h.step_valid = h.valid && h.tag == h.pend_tag && !h.pend_cut && smooth_view_step(h.prev, h.pend, &h.step_d, &h.step_a);
             memcpy(h.prev, h.pend, 64);
             memcpy(h.prevfov, h.pendfov, sizeof(h.prevfov));
             h.tag = h.pend_tag;
@@ -185,8 +206,8 @@ static void post() {
     static LONG last = 0;
     if (g_diag && g_logic_calls - last >= 600) {
         last = g_logic_calls;
-        log_line("SMOOTH-001: logic calls=%ld interp=%ld interp_cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld | src=%d live=%d",
-                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, src_tag(), smooth_live(1));
+        log_line("SMOOTH-001: logic calls=%ld interp=%ld interp_cut=%ld skip_hist=%ld fov_interp=%ld fov_cut=%ld jump_cut=%ld | src=%d live=%d",
+                 g_logic_calls, g_st.interp, g_st.interp_cut, g_skip_hist, g_fov_interp, g_fov_cut, g_jump_cut, src_tag(), smooth_live(1));
     }
     static LONG reported = 0;
     if (!reported && g_st.interp > 0) {
@@ -238,6 +259,7 @@ static bool install() {
     g_diag = config_row("SMOOTH-001-DIAG", 0);
     g_camlog = config_row("SMOOTH-001-CAMLOG", 0);
     g_fov = config_row("SMOOTH-001-FOV", 1);
+    g_jump = config_row("SMOOTH-001-JUMPCUT", 1);
     if (g_fov) {
         // MsCommitCameraFovAspect(idx): FOV/aspect from the camera block idx*0x1C0 (+0x10/+0x14), then the view commit
         uint8_t* f = sig_find_unique("SMOOTH-001 MsCommitCameraFovAspect",
@@ -277,6 +299,8 @@ static bool install() {
              rt_to_gva_exe(fin), rt_to_gva_exe(sites[0]), rt_to_gva_exe(sites[1]), rt_to_gva_exe(sites[2]),
              rt_to_gva_exe(g_view), rt_to_gva_exe((const void*)g_src2), rt_to_gva_exe((const void*)g_src3),
              rt_to_gva_exe(commit), g_diag);
+    log_line("  SMOOTH-001: jump cut %s (SMOOTH-001-JUMPCUT; step > %.0fx the previous tick's and > %.0f units or %.0f deg)",
+             g_jump ? "ON" : "OFF", k_jump_ratio, k_jump_dist, k_jump_deg);
     log_line("  SMOOTH-001: FOV interpolation %s (SMOOTH-001-FOV; MsCommitCameraFovAspect gva=0x%08X, blocks gva=0x%08X)",
              g_fov ? "ON" : "OFF", g_fovcommit ? rt_to_gva_exe((void*)g_fovcommit) : 0,
              g_fovblk ? rt_to_gva_exe(g_fovblk) : 0);
