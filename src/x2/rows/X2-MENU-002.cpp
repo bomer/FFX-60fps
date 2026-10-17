@@ -53,7 +53,7 @@ static bool g_battle_menu = false;   // a 0x4000000 request was seen; never clai
 
 // Parts, each with an ini key and a numpad hotkey (game window focused, logged). U 14/10/2026: "hotkey to turn on/off
 // each of them mid game so i can choose what to keep".
-//   Num 0  X2-MENU-002           the whole row (off = X2-MENU-001 stock pacing, 30 fps menu)
+//   Num 9  X2-MENU-002           the whole row (off = X2-MENU-001 stock pacing, 30 fps menu)
 //   Num 1  X2-MENU-002-TWEEN     tween slides drawn half-way (Tween_GetValue / Tween_GetPhase)
 //   Num 2  X2-MENU-002-DRAWREPLAY task draw-phase replay (panel shadows)
 //   Num 3  X2-MENU-002-POINT     screen point [0x16BC550]/[0x16BC554] (eased by tweens 0x16BDA80/90 in FUN_00761f30,
@@ -87,7 +87,7 @@ static void add_var(uint8_t* p, int size, bool sgn, int* toggle) {
 
 struct Hotkey { int vk; int* flag; const char* name; bool prev; };
 static Hotkey g_keys[] = {
-    { VK_NUMPAD0, &g_user_on,    "X2-MENU-002 (60 fps main menu)", false },
+    { VK_NUMPAD9, &g_user_on,    "X2-MENU-002 (60 fps main menu)", false },
     { VK_NUMPAD1, &g_t_tween,    "X2-MENU-002-TWEEN (slides)", false },
     { VK_NUMPAD2, &g_drawreplay, "X2-MENU-002-DRAWREPLAY (shadows)", false },
     { VK_NUMPAD3, &g_t_point,    "X2-MENU-002-POINT (screen point)", false },
