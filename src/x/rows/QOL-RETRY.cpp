@@ -89,8 +89,100 @@ static void build_text() {
 }
 static int g_style = 0;                             // QOL-RETRY-STYLE: 0 field dialogue (choices), 1 battle caption
 
+// QOL-RETRY-DIFF (diagnostic, default 0): find battle state the retry does not reset (U 18/10/2026: Yunalesca retried
+// in her second form starts the new battle in that form). Copies FFX.exe's writable section when the first battle
+// reaches state 1 (fresh) and when the prompt opens (end of the lost attempt); when the retry reaches state 1 it logs
+// every range that differs from the fresh copy and equals the end copy, i.e. state carried over from the lost attempt.
+static int g_diff = 0;
+static int g_diff_phase = 0;                        // 1 wait fresh state 1, 2 wait prompt, 3 wait retry setup, 4 wait retry state 1
+static uint8_t *g_dat = nullptr, *g_dat_fresh = nullptr, *g_dat_end = nullptr;
+static uint32_t g_dat_len = 0;
+
+static bool diff_alloc() {
+    if (g_dat_fresh) return true;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)exe_base();
+    IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(exe_base() + dos->e_lfanew);
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {   // the largest writable section (.data with bss)
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        uint32_t len = sec[i].Misc.VirtualSize & ~3u;
+        if (len > g_dat_len) { g_dat = exe_base() + sec[i].VirtualAddress; g_dat_len = len; }
+    }
+    if (!g_dat_len) return false;
+    g_dat_fresh = (uint8_t*)VirtualAlloc(nullptr, g_dat_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_dat_end = (uint8_t*)VirtualAlloc(nullptr, g_dat_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_dat_fresh || !g_dat_end) {
+        if (g_dat_fresh) VirtualFree(g_dat_fresh, 0, MEM_RELEASE);
+        if (g_dat_end) VirtualFree(g_dat_end, 0, MEM_RELEASE);
+        g_dat_fresh = g_dat_end = nullptr;
+        log_line("QOL-RETRY-DIFF: no memory for 2 x 0x%X bytes - off", g_dat_len);
+        g_diff = 0;
+        return false;
+    }
+    log_line("QOL-RETRY-DIFF: watching gva 0x%08X..0x%08X", rt_to_gva_exe(g_dat), rt_to_gva_exe(g_dat) + g_dat_len);
+    return true;
+}
+
+static void hex16(char* out, const uint8_t* p, uint32_t n) {
+    static const char hx[] = "0123456789ABCDEF";
+    if (n > 16) n = 16;
+    for (uint32_t i = 0; i < n; i++) { out[i * 3] = hx[p[i] >> 4]; out[i * 3 + 1] = hx[p[i] & 15]; out[i * 3 + 2] = ' '; }
+    out[n ? n * 3 - 1 : 0] = 0;
+}
+
+static void diff_report() {
+    const uint32_t* cur = (const uint32_t*)g_dat;
+    const uint32_t* fr = (const uint32_t*)g_dat_fresh;
+    const uint32_t* en = (const uint32_t*)g_dat_end;
+    uint32_t n = g_dat_len / 4, changed = 0, carried = 0, ranges = 0, logged = 0;
+    uint32_t start = 0, last = 0;
+    bool open = false;
+    auto flush = [&]() {
+        ranges++;
+        if (logged >= 300) return;
+        logged++;
+        uint32_t off = start * 4, len = (last - start + 1) * 4;
+        char a[64], b[64];
+        hex16(a, g_dat_fresh + off, len); hex16(b, g_dat + off, len);
+        log_line("QOL-RETRY-DIFF: carried gva 0x%08X len 0x%X fresh [%s] retry [%s]", rt_to_gva_exe(g_dat + off), len, a, b);
+    };
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t c = cur[i];
+        if (c == fr[i]) continue;
+        changed++;
+        if (c != en[i]) continue;
+        carried++;
+        if (open && i - last <= 4) { last = i; continue; }
+        if (open) flush();
+        start = last = i; open = true;
+    }
+    if (open) flush();
+    log_line("QOL-RETRY-DIFF: retry state 1 vs fresh state 1: %u dwords differ, %u carried from the lost attempt in %u ranges "
+             "(%u logged)", changed, carried, ranges, logged);
+    uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);   // DAT_0112a9a8: battle file buffer (MsBattleSetupEncounter)
+    log_line("QOL-RETRY-DIFF: battle file buffer %p (%s the watched section)", file,
+             file >= g_dat && file < g_dat + g_dat_len ? "inside" : "outside");
+}
+
+static void diff_step() {                           // from pre(), each invocation
+    if (!g_diff) return;
+    uint8_t st = *g_a8e0;
+    if (g_diff_phase == 1 && st == 1) {
+        memcpy(g_dat_fresh, g_dat, g_dat_len);
+        g_diff_phase = 2;
+        log_line("QOL-RETRY-DIFF: fresh copy at state 1");
+    } else if (g_diff_phase == 4 && st == 1) {
+        diff_report();
+        g_diff_phase = 0;
+    }
+}
+
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
+    if (g_diff && mode == 0) {
+        if (g_reissue && g_diff_phase == 3) g_diff_phase = 4;
+        else if (!g_reissue && diff_alloc()) g_diff_phase = 1;
+    }
     if (!g_disabled && mode == 0 && g_save_len) {
         __try {
             memcpy(g_snap_save, g_save, g_save_len);
@@ -199,6 +291,7 @@ static void pre() {
     }
     if (g_disabled) return;
     __try {
+        diff_step();
         if (g_reissue) {                             // retry armed: the field branch should start the battle
             if (*g_a8e2 == 0 && *g_a8e0 == 0) rearm_request();
             if (++g_reissue > REISSUE_WAIT) {
@@ -235,6 +328,11 @@ static void pre() {
                 g_prompt_seen = false;
                 g_state = ST_PROMPT;
                 log_line("QOL-RETRY: game over (state 0x%02X): Retry / Give up prompt open", st);
+                if (g_diff && g_diff_phase == 2) {
+                    memcpy(g_dat_end, g_dat, g_dat_len);
+                    g_diff_phase = 3;
+                    log_line("QOL-RETRY-DIFF: end copy at the prompt");
+                }
             }
             break;
         }
@@ -316,6 +414,7 @@ static bool install() {
     ffx_text_init();
     g_chord = config_row("QOL-RETRY-CHORD", 1) != 0;
     g_style = config_row("QOL-RETRY-STYLE", 0);
+    g_diff = config_row("QOL-RETRY-DIFF", 0);
     g_setup_fn = sig_find_unique("QOL-RETRY MsBattleSetupEncounter",
         "55 8B EC 53 56 57 E8 ?? ?? ?? ?? 8B 5D 08 85 C0 74 28 85 DB 75 37 68", 0x781020);
     g_post_fn = sig_find_unique("QOL-RETRY post-battle FUN_00861160",
