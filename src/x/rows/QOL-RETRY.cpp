@@ -16,8 +16,10 @@
 //   is detoured: the snapshot is restored and it returns 1 without the title or post-battle path. The next
 //   invocation re-writes the request (a9d4 is zeroed at 0x790EF2 after the call), and the field branch starts the same
 //   battle. If no battle starts within 60 invocations, the original FUN_00861160 runs with the saved arguments.
+// - QOL-RETRY-MAPFX (default 1): the field map stays loaded across a retry, so map particle state a battle changed
+//   stays changed (Yunalesca: her ground sigil, map particle 13, hidden and dimmed; the retry started with a dark ring,
+//   U 18/10/2026). Each map particle's control flags and RGBA are copied at battle setup and written back on Retry.
 #include "../fps60.h"
-#include <stdio.h>
 #include <string.h>
 
 typedef void(__cdecl* setup_t)(uint32_t mode, int area, int group, int form);
@@ -90,638 +92,52 @@ static void build_text() {
 }
 static int g_style = 0;                             // QOL-RETRY-STYLE: 0 field dialogue (choices), 1 battle caption
 
-// QOL-RETRY-DIFF (diagnostic, default 0): find battle state the retry does not reset (U 18/10/2026: Yunalesca retried
-// in her second form starts the new battle in that form). Copies FFX.exe's writable section when the first battle
-// reaches state 1 (fresh) and when the prompt opens (end of the lost attempt); when the retry reaches state 1 it logs
-// every range that differs from the fresh copy and equals the end copy, i.e. state carried over from the lost attempt.
-static int g_diff = 0;
-static int g_diff_phase = 0;                        // 1 wait fresh state 1, 2 wait prompt, 3 wait retry setup, 4 wait retry state 1
-// Watched regions: [0] FFX.exe's largest writable section (.data with bss); [1] the heap allocation that holds the
-// battle file buffer DAT_0112a9a8 (outside .data, D 18/10/2026 03:09:52), found at the fresh copy.
-struct DiffRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* end; uint8_t* ok; };   // ok: per 4 KB page, 1 = in both copies
-static DiffRgn g_rgn[2];
-// Transformation window (D 18/10/2026 03:21: the chr-name buffer at Ghidra VA 0x012FC5C4 held "130/m130" at the fresh
-// state 1 and "175/m175" at the retry's): a .data copy every 15 invocations of the lost attempt; when that buffer changes,
-// every dword that changed since the previous copy is marked. The report lists carried dwords that were marked.
-enum { WATCH_GVA = 0x012FC5C4, WIN_INV = 15 };
-static uint8_t* g_prev = nullptr;
-static uint32_t* g_tbits = nullptr;
-static uint64_t g_watch = 0;
-static int g_tick = 0;
-
-static uint8_t* diff_buf(uint32_t len) { return (uint8_t*)VirtualAlloc(nullptr, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); }
-static void diff_free(DiffRgn& r) {
-    if (r.fresh) VirtualFree(r.fresh, 0, MEM_RELEASE);
-    if (r.end) VirtualFree(r.end, 0, MEM_RELEASE);
-    if (r.ok) VirtualFree(r.ok, 0, MEM_RELEASE);
-    memset(&r, 0, sizeof(r));
-}
-
-static bool diff_alloc() {
-    DiffRgn& d = g_rgn[0];
-    if (d.fresh) return true;
-    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)exe_base();
-    IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(exe_base() + dos->e_lfanew);
-    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
-        uint32_t len = sec[i].Misc.VirtualSize & ~3u;
-        if (len > d.len) { d.p = exe_base() + sec[i].VirtualAddress; d.len = len; }
-    }
-    if (!d.len) return false;
-    d.fresh = diff_buf(d.len); d.end = diff_buf(d.len); d.ok = diff_buf(d.len / 0x1000 + 1);
-    g_prev = diff_buf(d.len); g_tbits = (uint32_t*)diff_buf(d.len / 32 + 4);
-    if (!d.fresh || !d.end || !d.ok || !g_prev || !g_tbits) {
-        log_line("QOL-RETRY-DIFF: no memory for 2 x 0x%X bytes - off", d.len);
-        diff_free(d);
-        g_diff = 0;
-        return false;
-    }
-    log_line("QOL-RETRY-DIFF: watching gva 0x%08X..0x%08X", rt_to_gva_exe(d.p), rt_to_gva_exe(d.p) + d.len);
-    return true;
-}
-
-// The heap span can be decommitted between the copies (D 18/10/2026 03:16:11: the end copy faulted, the row went off
-// with the prompt up and the battle hung): copy and compare only pages that are committed and readable.
-static bool page_readable(const uint8_t* p) {
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return false;
-    return !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && (mbi.Protect & 0xFF) != 0;
-}
-
-static void hex16(char* out, const uint8_t* p, uint32_t n) {
-    static const char hx[] = "0123456789ABCDEF";
-    if (n > 16) n = 16;
-    for (uint32_t i = 0; i < n; i++) { out[i * 3] = hx[p[i] >> 4]; out[i * 3 + 1] = hx[p[i] & 15]; out[i * 3 + 2] = ' '; }
-    out[n ? n * 3 - 1 : 0] = 0;
-}
-
-// Every carried range goes to fps60_retrydiff.txt next to FFX.exe; the log gets the totals and the first 40 per region.
-static void diff_report() {
-    char path[MAX_PATH];
-    GetModuleFileNameA(nullptr, path, MAX_PATH);
-    char* sl = strrchr(path, '\\');
-    if (sl) strcpy(sl + 1, "fps60_retrydiff.txt");
-    FILE* f = fopen(path, "w");
-    uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);
-    if (f) fprintf(f, "QOL-RETRY-DIFF: retry state 1 vs fresh state 1, ranges equal to the end of the lost attempt\n"
-                      "battle file buffer now %p\n", file);
-    for (int k = 0; k < 2; k++) {
-        DiffRgn& r = g_rgn[k];
-        if (!r.fresh) continue;
-        const uint32_t* cur = (const uint32_t*)r.p;
-        const uint32_t* fr = (const uint32_t*)r.fresh;
-        const uint32_t* en = (const uint32_t*)r.end;
-        uint32_t n = r.len / 4, changed = 0, carried = 0, ranges = 0, logged = 0;
-        uint32_t start = 0, last = 0;
-        bool open = false;
-        auto flush = [&]() {
-            ranges++;
-            uint32_t off = start * 4, len = (last - start + 1) * 4;
-            char a[64], b[64];
-            hex16(a, r.fresh + off, len); hex16(b, r.p + off, len);
-            uint32_t addr = k == 0 ? rt_to_gva_exe(r.p + off) : off;
-            if (f) fprintf(f, "%s 0x%08X len 0x%X fresh [%s] retry [%s]\n", k == 0 ? "gva" : "file+", addr, len, a, b);
-            if (logged < 40) {
-                logged++;
-                log_line("QOL-RETRY-DIFF: carried %s 0x%08X len 0x%X fresh [%s] retry [%s]", k == 0 ? "gva" : "file+", addr,
-                         len, a, b);
-            }
-        };
-        for (uint32_t i = 0; i < n; i++) {
-            if ((i & 0x3FF) == 0 && !(r.ok[i >> 10] && page_readable(r.p + i * 4))) { i += 0x3FF; continue; }
-            uint32_t c = cur[i];
-            if (c == fr[i]) continue;
-            changed++;
-            if (c != en[i] && k == 0) continue;     // the file: every difference from the fresh load
-            carried++;
-            if (open && i - last <= (k == 0 ? 4u : 1u)) { last = i; continue; }
-            if (open) flush();
-            start = last = i; open = true;
-        }
-        if (open) flush();
-        log_line("QOL-RETRY-DIFF: %s: %u dwords differ, %u carried from the lost attempt in %u ranges",
-                 k == 0 ? ".data" : "heap", changed, carried, ranges);
-        if (f) fprintf(f, "%s: %u dwords differ, %u carried in %u ranges\n", k == 0 ? ".data" : "heap", changed, carried, ranges);
-        if (k == 0 && g_tbits) {                     // carried and changed in a chr-name window of the lost attempt
-            uint32_t hits = 0;
-            for (uint32_t i = 0; i < n; i++) {
-                if (!(g_tbits[i >> 5] & (1u << (i & 31)))) continue;
-                if (cur[i] == fr[i] || cur[i] != en[i]) continue;
-                hits++;
-                uint32_t gva = rt_to_gva_exe(r.p + i * 4);
-                if (f) fprintf(f, "TRANS gva 0x%08X fresh %08X retry %08X\n", gva, fr[i], cur[i]);
-                if (hits <= 200) log_line("QOL-RETRY-DIFF: TRANS gva 0x%08X fresh %08X retry %08X", gva, fr[i], cur[i]);
-            }
-            log_line("QOL-RETRY-DIFF: %u carried dwords changed in a chr-name window", hits);
-        }
-    }
-    if (f) fclose(f);
-    log_line("QOL-RETRY-DIFF: battle file buffer now %p; all ranges in %s", file, path);
-}
-
-static bool copy_page(uint8_t* dst, const uint8_t* src, uint32_t n) {
-    __try { memcpy(dst, src, n); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-
-// The page test alone was not enough (D 18/10/2026 03:18:45: still faulted at the end copy), so each page is copied
-// under its own guard too.
-static void diff_copy(bool fresh) {
-    for (int k = 0; k < 2; k++) {
-        DiffRgn& r = g_rgn[k];
-        if (!r.fresh) continue;
-        uint32_t bad = 0;
-        for (uint32_t off = 0, pg = 0; off < r.len; off += 0x1000, pg++) {
-            uint32_t n = r.len - off < 0x1000 ? r.len - off : 0x1000;
-            bool ok = page_readable(r.p + off) && page_readable(r.p + off + n - 1) &&
-                      copy_page((fresh ? r.fresh : r.end) + off, r.p + off, n);
-            if (!ok) bad++;
-            r.ok[pg] = fresh ? ok : (r.ok[pg] && ok);
-        }
-        if (bad) log_line("QOL-RETRY-DIFF: %s copy: %u of %u pages not readable (skipped)", fresh ? "fresh" : "end", bad,
-                          (r.len + 0xFFF) / 0x1000);
-    }
-}
-
-static char printable(char c) { return (uint8_t)c < 0x20 || (uint8_t)c > 0x7E ? '.' : c; }
-
-static void diff_window() {                         // phase 2, each invocation
-    if (++g_tick % WIN_INV) return;
-    DiffRgn& d = g_rgn[0];
-    uint64_t w = *(volatile uint64_t*)(exe_base() + (WATCH_GVA - 0x400000));
-    if (w != g_watch) {
-        const uint32_t* cur = (const uint32_t*)d.p;
-        const uint32_t* pv = (const uint32_t*)g_prev;
-        uint32_t n = d.len / 4, marked = 0;
-        for (uint32_t i = 0; i < n; i++)
-            if (cur[i] != pv[i]) { g_tbits[i >> 5] |= 1u << (i & 31); marked++; }
-        char a[9], b[9];
-        memcpy(a, &g_watch, 8); memcpy(b, &w, 8);
-        for (int i = 0; i < 8; i++) { a[i] = printable(a[i]); b[i] = printable(b[i]); }
-        a[8] = b[8] = 0;
-        log_line("QOL-RETRY-DIFF: chr name \"%s\" -> \"%s\" at invocation %d: %u dwords changed in the window",
-                 a, b, g_tick, marked);
-        g_watch = w;
-    }
-    memcpy(g_prev, d.p, d.len);
-}
-
-// Enemy slots (D 18/10/2026 03:33: no form flag among the carried .data values): per monster slot i < 8, the monster
-// record FUN_00795aa0(i) = i * 0xF90 + [0x01134468] (+0x0E id, +0x48 model data) and the battle block
-// FUN_00794020(0x14 + i) = (0x14 + i) * 0xF90 + [0x011334D4] (+0xF60 HP, +0x5A4 max HP, +0x590 flags).
-// Logged when anything in that set changes, from the fresh state 1 to 40 s into the retry.
-static uint32_t g_slot_sig = 0;
-static int g_slot_log_until = 0;
-static void diff_slots(const char* why) {
-    uint8_t* eb = exe_base();
-    uint8_t* mon = *(uint8_t**)(eb + (0x01134468 - 0x400000));
-    uint8_t* blk = *(uint8_t**)(eb + (0x011334D4 - 0x400000));
-    if (!mon || !blk) return;
-    char buf[640]; int n = 0;
-    uint32_t sig = 2166136261u;
-    for (int i = 0; i < 8; i++) {
-        uint8_t* m = mon + i * 0xF90;
-        uint8_t* b = blk + (0x14 + i) * 0xF90;
-        uint16_t id = *(uint16_t*)(m + 0xE);
-        int32_t hp = *(int32_t*)(b + 0xF60), mhp = *(int32_t*)(b + 0x5A4);
-        uint32_t data = *(uint32_t*)(m + 0x48), fl = *(uint8_t*)(b + 0x590);
-        sig = (sig ^ id) * 16777619u; sig = (sig ^ (uint32_t)hp) * 16777619u; sig = (sig ^ (data != 0)) * 16777619u;
-        sig = (sig ^ fl) * 16777619u;
-        if (id == 0xFFFF && !data) continue;
-        n += _snprintf(buf + n, sizeof(buf) - n, " [%d id %04X data %s hp %d/%d fl %02X]", i, id, data ? "y" : "n", hp, mhp, fl);
-        if (n >= (int)sizeof(buf) - 64) break;
-    }
-    if (why || sig != g_slot_sig) log_line("QOL-RETRY-DIFF: slots%s%s:%s", why ? " at " : "", why ? why : "", buf);
-    g_slot_sig = sig;
-}
-
-// "Load Character" FUN_0082a1c0 (cdecl(path, a, b, flags), plain RET 0x82A31B/0x82A377; one caller 0x82A002): the
-// retry's first loaded chr was m175 (D 03:38, table 0x012FC598). Monster loads are logged with the FFX.exe return
-// addresses of the stack, from the fresh battle to 40 s into the retry.
-typedef void*(__cdecl* chrload_t)(const char* path, int a, int b, uint32_t flags);
-static chrload_t g_chrload = nullptr;
-static uint8_t* g_chrload_fn = nullptr;
-static void* __cdecl h_chrload(const char* path, int a, int b, uint32_t flags) {
-    if (g_diff && (g_diff_phase != 0 || g_slot_log_until > 0)) {
-        __try {
-            if (path && strstr(path, "mon")) {
-                void* fr[16];
-                USHORT nf = RtlCaptureStackBackTrace(0, 16, fr, nullptr);
-                char chain[160]; int n = 0;
-                uint8_t* eb = exe_base(); uint32_t es = exe_size();
-                for (USHORT i = 0; i < nf && n < (int)sizeof(chain) - 12; i++)
-                    if ((uint8_t*)fr[i] >= eb && (uint8_t*)fr[i] < eb + es)
-                        n += _snprintf(chain + n, sizeof(chain) - n, " %08X", rt_to_gva_exe(fr[i]));
-                chain[n] = 0;
-                log_line("QOL-RETRY-DIFF: load chr %s (phase %d, a8e0 0x%02X) from%s", path, g_diff_phase, *g_a8e0, chain);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    return g_chrload(path, a, b, flags);
-}
-
-// Monster chr caches (D 03:43: the transformation's magic DLL loads m175 from its start handler; the retry loads no
-// monster chr at all, so it reuses a resident one): the Memory Cache, 100 entry pointers at 0x01302F98 (entry +0 id,
-// +4 kind (1 = chr), +6 state, +0xC data, +0x10.. objects; FUN_0083ffe0/FUN_00840560/FUN_00840680), and the field
-// workers FUN_0086a830(i), i < [0x01325BAC] (u8), with the field context 0x01325BA0 current (as FUN_00866240):
-// +0xA8 chr id, +0x9C chr, +0xA4, +0x33/+0x38 flags. Monster ids (0x1000..0x1FFF) only.
-typedef int(__cdecl* worker_t)(int);
-static void diff_cache(const char* why) {
-    uint8_t* eb = exe_base();
-    auto at = [eb](uint32_t va) { return eb + (va - 0x400000); };
-    uint32_t** tbl = (uint32_t**)at(0x01302F98);
-    for (int i = 0; i < 100; i++) {
-        uint32_t* e = tbl[i];
-        if (!e || !e[3] || (e[0] & 0xF000) != 0x1000 || (uint8_t)e[1] != 1) continue;
-        log_line("QOL-RETRY-DIFF: cache %s: [%d] id %04X state %d data %08X obj %08X %08X %08X %08X", why, i, e[0],
-                 ((uint8_t*)e)[6], e[3], e[4], e[5], e[6], e[7]);
-    }
-}
-
-static void diff_workers(const char* why) {         // the context pointer is restored even on a fault
-    uint8_t* eb = exe_base();
-    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
-    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
-    uint8_t* saved = *ctx;
-    *ctx = eb + (0x01325BA0 - 0x400000);
-    __try {
-        int n = *(eb + (0x01325BAC - 0x400000));
-        for (int i = 0; i < n; i++) {
-            uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
-            if (!w) continue;
-            uint16_t id = *(uint16_t*)(w + 0xA8);
-            if ((id & 0xF000) != 0x1000) continue;
-            log_line("QOL-RETRY-DIFF: worker %s: [%d] chr id %04X chr %08X +A4 %08X fl33 %02X fl38 %04X", why, i, id,
-                     *(uint32_t*)(w + 0x9C), *(uint32_t*)(w + 0xA4), w[0x33], *(uint16_t*)(w + 0x38));
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: worker dump faulted"); }
-    *ctx = saved;
-}
-
-// Yunalesca's chr object (D 03:46: field worker 10, chr id 0x1082, +0x9C = 0FB3C650 at every point; the battle reuses
-// it, so the form-2 swap lives in it): the first 12 KB of each field-worker monster chr are copied at the fresh state 1
-// and every changed dword is logged at the prompt and the retry's state 1.
-struct ObjRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* ok; const char* what; };
-enum { OBJ_MAX = 8 };
-static ObjRgn g_obj[OBJ_MAX];
-static int    g_obj_n = 0;
-
-static void obj_add(uint8_t* p, uint32_t len, const char* what) {
-    if (!p || g_obj_n >= OBJ_MAX) return;
-    ObjRgn& r = g_obj[g_obj_n];
-    if (!r.fresh || r.len < len) {
-        if (r.fresh) VirtualFree(r.fresh, 0, MEM_RELEASE);
-        if (r.ok) VirtualFree(r.ok, 0, MEM_RELEASE);
-        r.fresh = diff_buf(len); r.ok = diff_buf(len / 0x1000 + 1);
-        if (!r.fresh || !r.ok) return;
-    }
-    r.p = p; r.len = len; r.what = what;
-    for (uint32_t o = 0; o < len; o += 0x1000)
-        r.ok[o >> 12] = page_readable(p + o) && copy_page(r.fresh + o, p + o, 0x1000);
-    g_obj_n++;
-}
-
-// Yunalesca's chr: the first 12 KB matched the fresh copy at the retry's state 1 except motion counters (D 03:48), so
-// the form is held further in or in shared data: per monster field worker the chr (+0x9C, 32 KB) and +0xA4 (16 KB),
-// per monster chr cache entry its data (+0xC, 64 KB) and object (+0x10, 16 KB).
-static void chr_snap_take() {
-    uint8_t* eb = exe_base();
-    g_obj_n = 0;
-    __try {
-        uint32_t** tbl = (uint32_t**)(eb + (0x01302F98 - 0x400000));
-        for (int i = 0; i < 100; i++) {
-            uint32_t* e = tbl[i];
-            if (!e || !e[3] || (e[0] & 0xF000) != 0x1000 || (uint8_t)e[1] != 1) continue;
-            obj_add((uint8_t*)(uintptr_t)e[3], 0x200000, "cache data");
-            obj_add((uint8_t*)(uintptr_t)e[4], 0x4000, "cache obj");
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
-    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
-    uint8_t* saved = *ctx;
-    *ctx = eb + (0x01325BA0 - 0x400000);
-    __try {
-        int n = *(eb + (0x01325BAC - 0x400000));
-        for (int i = 0; i < n; i++) {
-            uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
-            if (!w || (*(uint16_t*)(w + 0xA8) & 0xF000) != 0x1000) continue;
-            obj_add(*(uint8_t**)(w + 0x9C), 0x13000, "worker chr");
-            obj_add(*(uint8_t**)(w + 0xA4), 0x4000, "worker +A4");
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    *ctx = saved;
-    for (int k = 0; k < g_obj_n; k++) log_line("QOL-RETRY-DIFF: object %s %p +0x%X copied", g_obj[k].what, g_obj[k].p, g_obj[k].len);
-}
-
-static bool looks_float(uint32_t v) { uint32_t e = (v >> 23) & 0xFF; return v && e > 0x60 && e < 0x9F; }
-
-static void chr_snap_diff(const char* why) {
-    static uint8_t cur[0x1000];
-    for (int k = 0; k < g_obj_n; k++) {
-        ObjRgn& r = g_obj[k];
-        int logged = 0, changed = 0, ints = 0;
-        for (uint32_t o = 0; o < r.len; o += 0x1000) {
-            if (!r.ok[o >> 12] || !page_readable(r.p + o) || !copy_page(cur, r.p + o, 0x1000)) continue;
-            for (uint32_t i = 0; i < 0x1000; i += 4) {
-                uint32_t a = *(uint32_t*)(r.fresh + o + i), b = *(uint32_t*)(cur + i);
-                if (a == b) continue;
-                changed++;
-                if (looks_float(a) && looks_float(b) && strcmp(r.what, "cache data") != 0) continue;
-                ints++;
-                if (logged++ < (strcmp(r.what, "cache data") ? 150 : 400))
-                    log_line("QOL-RETRY-DIFF: %s %p %s +%05X fresh %08X now %08X", r.what, r.p, why, o + i, a, b);
-            }
-        }
-        log_line("QOL-RETRY-DIFF: %s %p %s: %d dwords changed, %d not float", r.what, r.p, why, changed, ints);
-    }
-}
-
-// QOL-RETRY-PARTFIX (test, default 0): the chr records every 0x880 bytes from +0x0BF4 (state dword, then two floats
-// that start at 1.0) were 2/2/3/3 at +0x1474/+0x1CF4/+0x2574/+0x2DF4 on the fresh state 1, 3/3/3/3 at the prompt
-// (form 2) and 2/2/2/2 at the retry's state 1 (form-2 body, U 18/10/2026). At the retry's state 1 the row writes the
-// records' three dwords back from the fresh copy of each field-worker chr and logs what it changed.
-static int g_partfix = 0;
-static void part_fix() {
-    for (int k = 0; k < g_obj_n; k++) {
-        ObjRgn& r = g_obj[k];
-        if (strcmp(r.what, "worker chr") != 0) continue;
-        int n = 0;
-        for (uint32_t o = 0x0BF4; o + 12 <= r.len; o += 0x880) {
-            if (!r.ok[o >> 12] || !r.ok[(o + 11) >> 12]) continue;
-            for (uint32_t i = 0; i < 12; i += 4) {
-                uint32_t* cur = (uint32_t*)(r.p + o + i);
-                uint32_t fr = *(uint32_t*)(r.fresh + o + i);
-                if (*cur == fr) continue;
-                log_line("QOL-RETRY-PARTFIX: chr %p +%05X %08X -> %08X", r.p, o + i, *cur, fr);
-                *cur = fr;
-                n++;
-            }
-        }
-        log_line("QOL-RETRY-PARTFIX: chr %p: %d dwords written back", r.p, n);
-    }
-}
-
-static void diff_chr(const char* why) {
-    __try { diff_cache(why); } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: cache dump faulted"); }
-    diff_workers(why);
-}
-
-static void diff_step_body() {
-    uint8_t st = *g_a8e0;
-    // lost attempt in battle (2), the retry's entry states (4), and 40 s of the retry (after the report)
-    bool watch = (g_diff_phase == 2 && st == 1) || g_diff_phase == 4 || (g_diff_phase == 0 && g_slot_log_until > 0);
-    if (g_diff_phase == 0 && g_slot_log_until > 0) --g_slot_log_until;
-    if (watch) { __try { diff_slots(nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (g_diff_phase == 25) {                       // the prompt opened last invocation: end copy, apart from the prompt
-        diff_copy(false);
-        g_diff_phase = 3;
-        log_line("QOL-RETRY-DIFF: end copy at the prompt");
-        diff_chr("prompt");
-        chr_snap_diff("prompt");
-    } else if (g_diff_phase == 1 && st == 1) {
-        diff_copy(true);
-        memcpy(g_prev, g_rgn[0].p, g_rgn[0].len);
-        memset(g_tbits, 0, g_rgn[0].len / 32 + 4);
-        g_watch = *(volatile uint64_t*)(exe_base() + (WATCH_GVA - 0x400000));
-        g_tick = 0;
-        g_diff_phase = 2;
-        log_line("QOL-RETRY-DIFF: fresh copy at state 1");
-        __try { diff_slots("fresh state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        diff_chr("fresh state 1");
-        chr_snap_take();
-    } else if (g_diff_phase == 2) {
-        diff_window();
-    } else if (g_diff_phase == 4 && st == 1) {
-        g_diff_phase = 0;
-        __try { diff_slots("retry state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        diff_chr("retry state 1");
-        chr_snap_diff("retry state 1");
-        if (g_partfix) { __try { part_fix(); } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-PARTFIX: faulted"); } }
-        g_slot_log_until = 2400;
-        diff_report();
-    }
-}
-
-// A fault here turns the diagnostic off, never the row (a row fault with the prompt up hung the battle twice).
-static void diff_step() {                           // from pre(), each invocation
-    if (!g_diff) return;
-    __try { diff_step_body(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        log_line("QOL-RETRY-DIFF: fault 0x%08lX in phase %d - diagnostic off", GetExceptionCode(), g_diff_phase);
-        g_diff = 0;
-    }
-}
-
-// QOL-RETRY-CHR (test, default 0): the battle reuses the chr object of a monster the field already shows (Yunalesca:
-// field worker 10, chr id 0x1082, worker +0x9C; the battle loads no monster chr, D 03:43..03:53). Her transformation
-// changes that object (motion set +0x72C 0x10821001 -> 0x10821002, attached parts from +0xD000: enable flags, states,
-// part motions), the stock game never reuses it after a wipe (title), and the retry started with her form-2 body
-// (U 18/10/2026). At battle setup the row copies each field-worker monster chr object (the 0x880-byte actor slots before the battle slot [0x023C44E0],
-// 36 slots = 0x13200 for her) and writes it back when Retry is chosen, before the battle is re-requested. Worker access as
-// FUN_00866240: FUN_0086a830(i), i < [0x01325BAC], field context 0x01325BA0 current.
-enum { CHRS_MAX = 4, CHRS_LEN_MAX = 0x20000 };
-struct ChrSnap { int idx; uint16_t id; uint8_t* obj; uint32_t len; uint8_t* copy; uint32_t cap; };
-static ChrSnap g_cs[CHRS_MAX];
-static int g_cs_n = 0, g_chrfix = 0;
-
-static void chr_take() {
-    uint8_t* eb = exe_base();
-    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
-    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
-    uint8_t* saved = *ctx;
-    *ctx = eb + (0x01325BA0 - 0x400000);
-    g_cs_n = 0;
-    __try {
-        int n = *(eb + (0x01325BAC - 0x400000));
-        for (int i = 0; i < n && g_cs_n < CHRS_MAX; i++) {
-            uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
-            if (!w) continue;
-            uint16_t id = *(uint16_t*)(w + 0xA8);
-            uint8_t* obj = *(uint8_t**)(w + 0x9C);
-            if ((id & 0xF000) != 0x1000 || !obj) continue;
-            // The chr is an array of 0x880-byte actor slots; FUN_00828b30 copies slot 0 into slot [0x023C44E0] (36,
-            // = worker +0xA4) for the battle at FUN_00866240, after setup entry (+0xA4 not valid yet, D 03:56). The
-            // slots before it hold the field head and the attached parts the transformation changed.
-            uint32_t slot = *(uint32_t*)(eb + (0x023C44E0 - 0x400000));
-            uint32_t len = slot * 0x880;
-            if (!slot || len > CHRS_LEN_MAX) { log_line("QOL-RETRY-CHR: battle slot %u - not copied", slot); continue; }
-            ChrSnap& c = g_cs[g_cs_n];
-            if (c.cap < len) {
-                if (c.copy) VirtualFree(c.copy, 0, MEM_RELEASE);
-                c.copy = (uint8_t*)VirtualAlloc(nullptr, CHRS_LEN_MAX, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-                c.cap = c.copy ? CHRS_LEN_MAX : 0;
-                if (!c.copy) continue;
-            }
-            memcpy(c.copy, obj, len);
-            c.idx = i; c.id = id; c.obj = obj; c.len = len;
-            g_cs_n++;
-            log_line("QOL-RETRY-CHR: field worker %d monster chr %04X object %p (0x%X bytes) copied", i, id, obj, len);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        log_line("QOL-RETRY-CHR: copy faulted - not restored on retry");
-        g_cs_n = 0;
-    }
-    *ctx = saved;
-}
-
-static void chr_put() {
-    uint8_t* eb = exe_base();
-    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
-    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
-    uint8_t* saved = *ctx;
-    *ctx = eb + (0x01325BA0 - 0x400000);
-    __try {
-        for (int k = 0; k < g_cs_n; k++) {
-            ChrSnap& c = g_cs[k];
-            uint8_t* w = (uint8_t*)(uintptr_t)wk(c.idx);
-            if (!w || *(uint16_t*)(w + 0xA8) != c.id || *(uint8_t**)(w + 0x9C) != c.obj) {
-                log_line("QOL-RETRY-CHR: field worker %d no longer holds chr %04X at %p - left as is", c.idx, c.id, c.obj);
-                continue;
-            }
-            memcpy(c.obj, c.copy, c.len);
-            log_line("QOL-RETRY-CHR: field worker %d monster chr %04X object restored", c.idx, c.id);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-CHR: restore faulted"); }
-    *ctx = saved;
-}
-
-// QOL-RETRY-WATCH (diagnostic, default 0): restoring her whole chr object on Retry did not help; the retry's battle
-// start rebuilt the part slots in the form-2 setup (D 03:58). After the restore, hardware write breakpoints on the
-// game thread watch four of her fields (+0x1474 record state, +0xE42C part motion id, +0xE700 and +0x10900 part
-// enable flags); a vectored handler logs each write (EIP and the EBP chain, FFX.exe addresses as Ghidra VAs), up to
-// 6 per field, and the watch is cleared after 600 invocations. A helper thread sets the debug registers (the game
-// thread cannot set its own).
-static int g_watch_on = 0;
-static DWORD g_game_tid = 0;
-static uintptr_t g_wa[4];
-static volatile LONG g_whits[4];
-static int g_watch_left = 0;
-static PVOID g_veh = nullptr;
-
-static LONG CALLBACK watch_veh(EXCEPTION_POINTERS* ep) {
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
-    CONTEXT* c = ep->ContextRecord;
-    DWORD hit = c->Dr6 & 0xF;
-    if (!hit) return EXCEPTION_CONTINUE_SEARCH;
-    c->Dr6 = 0;
-    for (int i = 0; i < 4; i++) {
-        if (!(hit & (1u << i)) || InterlockedIncrement(&g_whits[i]) > 6) continue;
-        char chain[128]; int n = 0;
-        uint8_t* eb = exe_base(); uint32_t es = exe_size();
-        uintptr_t bp = c->Ebp;
-        for (int d = 0; d < 6 && bp && n < (int)sizeof(chain) - 12; d++) {
-            uintptr_t ret = 0, next = 0;
-            __try { next = *(uintptr_t*)bp; ret = *(uintptr_t*)(bp + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-            if ((uint8_t*)ret >= eb && (uint8_t*)ret < eb + es) n += _snprintf(chain + n, sizeof(chain) - n, " %08X", rt_to_gva_exe((void*)ret));
-            else n += _snprintf(chain + n, sizeof(chain) - n, " r%08X", (uint32_t)ret);
-            if (next <= bp) break;
-            bp = next;
-        }
-        chain[n] = 0;
-        uint8_t* eip = (uint8_t*)(uintptr_t)c->Eip;
-        bool in_exe = eip >= eb && eip < eb + es;
-        log_line("QOL-RETRY-WATCH: write to +%05X = %08X at %s%08X (a8e0 0x%02X) chain%s",
-                 (unsigned)(g_wa[i] - (uintptr_t)g_cs[0].obj), *(uint32_t*)g_wa[i], in_exe ? "gva " : "rt ",
-                 in_exe ? rt_to_gva_exe(eip) : (uint32_t)(uintptr_t)eip, *g_a8e0, chain);
-    }
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-static DWORD WINAPI watch_set_thread(LPVOID on) {
-    HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, g_game_tid);
-    if (!h) return 0;
-    if (SuspendThread(h) != (DWORD)-1) {
-        CONTEXT c = {};
-        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-        if (GetThreadContext(h, &c)) {
-            if (on) {
-                c.Dr0 = g_wa[0]; c.Dr1 = g_wa[1]; c.Dr2 = g_wa[2]; c.Dr3 = g_wa[3];
-                DWORD dr7 = 0;
-                for (int i = 0; i < 4; i++) dr7 |= (1u << (i * 2)) | (1u << (16 + i * 4)) | (3u << (18 + i * 4));   // L, RW=01 write, LEN=11 4 bytes
-                c.Dr7 = dr7;
-            } else {
-                c.Dr7 = 0;
-            }
-            c.Dr6 = 0;
-            SetThreadContext(h, &c);
-        }
-        ResumeThread(h);
-    }
-    CloseHandle(h);
-    return 0;
-}
-
-static void watch_arm(uint8_t* obj) {
-    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
-    static const uint32_t offs[4] = { 0x1474, 0xE42C, 0xE700, 0x10900 };
-    for (int i = 0; i < 4; i++) { g_wa[i] = (uintptr_t)obj + offs[i]; g_whits[i] = 0; }
-    HANDLE t = CreateThread(nullptr, 0, watch_set_thread, (LPVOID)1, 0, nullptr);
-    if (t) CloseHandle(t);
-    g_watch_left = 600;
-    log_line("QOL-RETRY-WATCH: write watch armed on chr %p", obj);
-}
-
-static void watch_step() {                          // from pre(), each invocation
-    if (g_watch_left > 0 && --g_watch_left == 0) {
-        HANDLE t = CreateThread(nullptr, 0, watch_set_thread, (LPVOID)0, 0, nullptr);
-        if (t) CloseHandle(t);
-        log_line("QOL-RETRY-WATCH: watch cleared (hits %ld %ld %ld %ld)", g_whits[0], g_whits[1], g_whits[2], g_whits[3]);
-    }
-}
-
-// QOL-RETRY-MAPFX (test, default 0): the bug was the map's ground sigil under Yunalesca, not her model (U 18/10/2026
-// screenshots: the ring is lit on the first fight, dark on the retry). The battle hides and dims the map particle
-// program (D 03:33/03:38 diffs, entry 13): control table 0x00D30260 + i*0x4C, flags dword +0 bit 0x10 = hidden
-// (set by FUN_00729400/FUN_00729570, cleared by FUN_00729440), 0 -> 0x10; program table 0x00D2C260 + i*0x80, +0x70
-// RGBA (u16, 0x1000 = 1.0), 1000 1000 1000 1000 -> 0800 0800 0800 1000. Count = *(u16*)([0x00D2C258] + 4). The map is
-// never reloaded on a retry. At battle setup the row copies both fields of every entry and writes them back on Retry.
+// Map particle programs (re/ledger/FX.md FX-010; D 18/10/2026 03:33/03:38 retry diffs, U 04:06 fixed): count
+// *(u16*)([0x00D2C258] + 4); control table 0x00D30260 + i * 0x4C, dword +0 flags, bit 0x10 = hidden (set by
+// FUN_00729400 / FUN_00729570, cleared by FUN_00729440); program table 0x00D2C260 + i * 0x80, +0x70 RGBA as four u16
+// (0x1000 = 1.0). Yunalesca's fight leaves particle 13 at flags 0x10, RGBA 0800 0800 0800 1000 (battle start: 0,
+// 1000 1000 1000 1000) and particles 15/16 at flags 0 (start: 1).
 enum { MAPFX_MAX = 128 };
-static int g_mapfx = 0, g_mapfx_n = 0;
-static uint32_t g_mapfx_flags[MAPFX_MAX];
-static uint64_t g_mapfx_rgba[MAPFX_MAX];
+static int        g_mapfx = 1;
+static uint8_t**  g_mapfx_hdr = nullptr;            // [0x00D2C258]
+static uint8_t*   g_mapfx_ctl = nullptr;            // 0x00D30260
+static uint8_t*   g_mapfx_prog = nullptr;           // 0x00D2C260
+static int        g_mapfx_n = 0;
+static uint32_t   g_mapfx_flags[MAPFX_MAX];
+static uint64_t   g_mapfx_rgba[MAPFX_MAX];
 
 static void mapfx_take() {
-    uint8_t* eb = exe_base();
     g_mapfx_n = 0;
-    __try {
-        uint8_t* hdr = *(uint8_t**)(eb + (0x00D2C258 - 0x400000));
-        if (!hdr) return;
-        int n = *(uint16_t*)(hdr + 4);
-        if (n > MAPFX_MAX) n = MAPFX_MAX;
-        for (int i = 0; i < n; i++) {
-            g_mapfx_flags[i] = *(uint32_t*)(eb + (0x00D30260 - 0x400000) + i * 0x4C);
-            g_mapfx_rgba[i] = *(uint64_t*)(eb + (0x00D2C260 - 0x400000) + i * 0x80 + 0x70);
-        }
-        g_mapfx_n = n;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { g_mapfx_n = 0; }
+    uint8_t* hdr = *g_mapfx_hdr;
+    if (!hdr) return;
+    int n = *(uint16_t*)(hdr + 4);
+    if (n > MAPFX_MAX) n = MAPFX_MAX;
+    for (int i = 0; i < n; i++) {
+        g_mapfx_flags[i] = *(uint32_t*)(g_mapfx_ctl + i * 0x4C);
+        g_mapfx_rgba[i] = *(uint64_t*)(g_mapfx_prog + i * 0x80 + 0x70);
+    }
+    g_mapfx_n = n;
 }
 
 static void mapfx_put() {
-    uint8_t* eb = exe_base();
-    __try {
-        uint8_t* hdr = *(uint8_t**)(eb + (0x00D2C258 - 0x400000));
-        if (!hdr || *(uint16_t*)(hdr + 4) < g_mapfx_n) { log_line("QOL-RETRY-MAPFX: map particle list changed - left as is"); return; }
-        for (int i = 0; i < g_mapfx_n; i++) {
-            uint32_t* fl = (uint32_t*)(eb + (0x00D30260 - 0x400000) + i * 0x4C);
-            uint64_t* c = (uint64_t*)(eb + (0x00D2C260 - 0x400000) + i * 0x80 + 0x70);
-            if (*fl != g_mapfx_flags[i] || *c != g_mapfx_rgba[i])
-                log_line("QOL-RETRY-MAPFX: map particle %d flags %08X -> %08X, rgba %016llX -> %016llX", i, *fl,
-                         g_mapfx_flags[i], *c, g_mapfx_rgba[i]);
-            *fl = g_mapfx_flags[i];
-            *c = g_mapfx_rgba[i];
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-MAPFX: restore faulted"); }
+    uint8_t* hdr = *g_mapfx_hdr;
+    if (!hdr || *(uint16_t*)(hdr + 4) < g_mapfx_n) {
+        log_line("QOL-RETRY-MAPFX: map particle list changed since battle setup - left as is");
+        return;
+    }
+    for (int i = 0; i < g_mapfx_n; i++) {
+        uint32_t* fl = (uint32_t*)(g_mapfx_ctl + i * 0x4C);
+        uint64_t* c = (uint64_t*)(g_mapfx_prog + i * 0x80 + 0x70);
+        if (*fl == g_mapfx_flags[i] && *c == g_mapfx_rgba[i]) continue;
+        log_line("QOL-RETRY-MAPFX: map particle %d flags %08X -> %08X, rgba %016llX -> %016llX", i, *fl, g_mapfx_flags[i],
+                 *c, g_mapfx_rgba[i]);
+        *fl = g_mapfx_flags[i];
+        *c = g_mapfx_rgba[i];
+    }
 }
 
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
-    if (g_mapfx && !g_disabled && mode == 0 && !g_reissue) mapfx_take();
-    if (g_chrfix && !g_disabled && mode == 0 && !g_reissue) chr_take();
-    if (g_diff && mode == 0) {
-        if (g_reissue && g_diff_phase == 3) { g_diff_phase = 4; diff_chr("retry setup"); }
-        else if (!g_reissue && diff_alloc()) g_diff_phase = 1;
-    }
     if (!g_disabled && mode == 0 && g_save_len) {
         __try {
             memcpy(g_snap_save, g_save, g_save_len);
@@ -729,6 +145,7 @@ static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
             for (int i = 0; i < 3; i++) g_snap_b48[i] = g_b48[k_b48_idx[i]];
             g_snap_a8e2 = *g_a8e2; g_snap_c256 = *g_c256; g_snap_c258 = *g_c258; g_snap_c259 = *g_c259;
             g_snap_a9d4 = *g_a9d4; g_snap_a9d5 = *g_a9d5;
+            if (g_mapfx) mapfx_take();
             g_snap_ok = true;
             if (g_reissue) log_line("QOL-RETRY: retry battle starts (area %d group %d form %d)", area, group, form);
             else log_line("QOL-RETRY: snapshot at battle start (area %d group %d form %d, scripted %d, b48 0x%08X)",
@@ -759,9 +176,7 @@ static int __cdecl h_post(int scripted, uint32_t key, int stage, int result) {
         g_retry = false;
         __try {
             restore();
-            if (g_chrfix) chr_put();
             if (g_mapfx) mapfx_put();
-            if (g_watch_on && g_cs_n > 0 && g_game_tid) watch_arm(g_cs[0].obj);
             rearm_request();
             g_post_args[0] = scripted; g_post_args[1] = (int)key; g_post_args[2] = stage; g_post_args[3] = result;
             g_reissue = 1;
@@ -830,15 +245,9 @@ static void pre() {
             return;
         }
         log_line("QOL-RETRY: battle setup and post-battle hooked on the game thread");
-        if (g_diff && g_chrload_fn &&
-            !hook_entry("QOL-RETRY-DIFF load chr", g_chrload_fn, (void*)&h_chrload, (void**)&g_chrload))
-            log_line("QOL-RETRY-DIFF: load chr hook failed - not logged");
     }
     if (g_disabled) return;
-    g_game_tid = GetCurrentThreadId();
-    watch_step();
     __try {
-        diff_step();
         if (g_reissue) {                             // retry armed: the field branch should start the battle
             if (*g_a8e2 == 0 && *g_a8e0 == 0) rearm_request();
             if (++g_reissue > REISSUE_WAIT) {
@@ -875,7 +284,6 @@ static void pre() {
                 g_prompt_seen = false;
                 g_state = ST_PROMPT;
                 log_line("QOL-RETRY: game over (state 0x%02X): Retry / Give up prompt open", st);
-                if (g_diff && g_diff_phase == 2) g_diff_phase = 25;   // copied by diff_step next invocation
             }
             break;
         }
@@ -942,7 +350,8 @@ static void pre() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("QOL-RETRY: fault 0x%08lX in pre - row off", GetExceptionCode());
         row_QOLRETRY.on = 0;
-        // release the battle: the busy and focus detours stay installed and hold slot 7 while g_state == ST_PROMPT
+        // Release the prompt: the busy and focus detours stay installed and hold slot 7 while g_state == ST_PROMPT. In
+        // the one fault seen (a diagnostic, 18/10/2026 03:18) the battle still hung after this release.
         if (g_state == ST_PROMPT) { __try { g_w_close(WIN); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
         g_state = ST_IDLE;
         g_retry = false;
@@ -961,14 +370,7 @@ static bool install() {
     ffx_text_init();
     g_chord = config_row("QOL-RETRY-CHORD", 1) != 0;
     g_style = config_row("QOL-RETRY-STYLE", 0);
-    g_diff = config_row("QOL-RETRY-DIFF", 0);
-    g_partfix = config_row("QOL-RETRY-PARTFIX", 0);
-    g_chrfix = config_row("QOL-RETRY-CHR", 0);
-    g_watch_on = config_row("QOL-RETRY-WATCH", 0);
-    g_mapfx = config_row("QOL-RETRY-MAPFX", 0);
-    if (g_diff)                                      // one match in fps60_image.bin
-        g_chrload_fn = sig_find_unique("QOL-RETRY-DIFF load chr FUN_0082a1c0",
-            "55 8B EC 81 EC 84 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 53 8B 5D 14 56 8B 75 08 57 68 80 00 00 00", 0x82A1C0);
+    g_mapfx = config_row("QOL-RETRY-MAPFX", 1);
     g_setup_fn = sig_find_unique("QOL-RETRY MsBattleSetupEncounter",
         "55 8B EC 53 56 57 E8 ?? ?? ?? ?? 8B 5D 08 85 C0 74 28 85 DB 75 37 68", 0x781020);
     g_post_fn = sig_find_unique("QOL-RETRY post-battle FUN_00861160",
@@ -1033,6 +435,26 @@ static bool install() {
     NEED(g_c256 && g_c258 && g_c259 && g_a9d4 && g_a8e2 && g_a9d5 && g_a8e0 && g_a8e3 && g_c9ec && g_b48);
     NEED(g_save && g_reward && g_choice_tbl && g_win_tbl);
     NEED(g_save_len > 0 && g_save_len <= SAVE_MAX);
+
+    if (g_mapfx) {
+        // FUN_00729400 (hide map particle by id): MOV EDX,[hdr] +5; MOV EAX,ctl +0x12; ... OR [EAX],0x10; ADD EAX,0x4C.
+        // FUN_00729530 (stop by id): MOV EAX,prog +0x12; ... SUB EAX,-0x80. One match each in fps60_image.bin.
+        uint8_t* hide = sig_find_unique("QOL-RETRY map particle hide FUN_00729400",
+            "55 8B EC 8B 15 ?? ?? ?? ?? 85 D2 74 29 0F B7 4A 04 B8 ?? ?? ?? ?? 85 C9 74 1C 56 66 8B 75 08 83 C2 66 49 66 "
+            "39 32 75 03 83 08 10 83 C2 50 83 C0 4C", 0x729400);
+        uint8_t* stop = sig_find_unique("QOL-RETRY map particle stop FUN_00729530",
+            "55 8B EC 8B 15 ?? ?? ?? ?? 85 D2 74 30 0F B7 4A 04 B8 ?? ?? ?? ?? 85 C9 74 23 56 66 8B 75 08 83 C2 66 49 66 "
+            "39 32 75 0A C7 00 00 00 00 00 C6 40 1D 00 83 C2 50 83 E8 80", 0x729530);
+        if (hide && stop) {
+            g_mapfx_hdr = (uint8_t**)read_abs(hide + 5);
+            g_mapfx_ctl = read_abs(hide + 0x12);
+            g_mapfx_prog = read_abs(stop + 0x12);
+        }
+        if (!g_mapfx_hdr || !g_mapfx_ctl || !g_mapfx_prog || read_abs(stop + 5) != (uint8_t*)g_mapfx_hdr) {
+            log_line("  QOL-RETRY: map particle tables not resolved - QOL-RETRY-MAPFX off");
+            g_mapfx = 0;
+        }
+    }
     NEED(g_a8e2 == g_a8e0 + 2 && g_a8e3 == g_a8e0 + 3);   // one battle-state struct (0x0112A8D0 +0x10..)
 
     g_w_reset   = (w1_t)call_target(bt + 0x08);
@@ -1053,6 +475,9 @@ static bool install() {
              "a8e0 gva=0x%08X, c9ec gva=0x%08X, choices gva=0x%08X", rt_to_gva_exe(g_setup_fn), rt_to_gva_exe(g_post_fn),
              rt_to_gva_exe(g_save), g_save_len, rt_to_gva_exe(g_reward), rt_to_gva_exe((void*)g_b48),
              rt_to_gva_exe((void*)g_a8e0), rt_to_gva_exe((void*)g_c9ec), rt_to_gva_exe(g_choice_tbl));
+    if (g_mapfx)
+        log_line("  QOL-RETRY-MAPFX: map particle header gva=0x%08X, control table gva=0x%08X, program table gva=0x%08X",
+                 rt_to_gva_exe(g_mapfx_hdr), rt_to_gva_exe(g_mapfx_ctl), rt_to_gva_exe(g_mapfx_prog));
     log_line("  QOL-RETRY: window fns reset 0x%08X style 0x%08X text 0x%08X anchor 0x%08X/0x%08X focus 0x%08X open 0x%08X "
              "choice 0x%08X state 0x%08X close 0x%08X colour 0x%08X",
              rt_to_gva_exe((void*)g_w_reset), rt_to_gva_exe((void*)g_w_style), rt_to_gva_exe((void*)g_w_text),
