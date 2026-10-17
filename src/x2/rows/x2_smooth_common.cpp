@@ -13,6 +13,13 @@ bool smooth_master() { return config_row("X2-SMOOTH", 1) != 0; }
 
 bool smooth_live(int row) { return g_live != 0 && (row == 0 || row != g_off_row); }
 
+bool smooth_get_live() { return g_live != 0; }
+void smooth_set_live(bool on) {
+    if ((g_live != 0) == on) return;
+    g_live = on ? 1 : 0;
+    log_line("X2-CFG-MENU: SMOOTH rows %s", on ? "ON" : "OFF (installed, pass-through)");
+}
+
 static bool focused() {
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;

@@ -34,6 +34,7 @@ static_assert(sizeof(CfgRow) == 0x2C, "Config row object is 0x2C bytes");
 
 typedef void (__cdecl* enter_t)(void* desc);
 typedef uint8_t* (__cdecl* text_t)(uint32_t id);
+typedef void (__cdecl* draw_t)();
 
 enum { ID_LABEL = 0xF00, ID_VALUE = 0xF40, ID_ON = 0x0B, ID_OFF = 0x0C, MAX_STOCK = 16 };
 
@@ -47,49 +48,52 @@ static bool g_hooked = false;
 static volatile int32_t* g_desc_state = nullptr;    // page descriptor +0x1C (from the enter's argument)
 static bool g_dirty = false;
 
+// CFG-MENU-SCROLL (default 1): the row draw spaces rows 740/count apart and sizes each bar for 8 rows, so 16 rows ran
+// into each other (U 16/10/2026; thinner bars cut through the text, same day). Cfg_DrawRows 0x8CBAB0 (no args, plain
+// RET, one caller 0x8CB33A) is detoured: around the original, the row array, count and cursor are pointed at a window
+// of the stock row count (8) that follows the cursor, so the page looks stock and scrolls; up/down still walk the
+// whole list. The HD row 0 test (DAT_0186a438, read only by the row draw) is moved off the window when the window
+// does not start at row 0.
+static uint8_t* g_draw_fn = nullptr; static draw_t g_draw = nullptr;
+static volatile int32_t* g_row0 = nullptr;          // DAT_0186a438
+static int g_top = 0;
+
+// CFG-MENU-ROWS (default 14; 8 = the stock layout): rows visible at once. The row draw spaces rows 740/count apart
+// and sizes each row for 8 (bar 60 + 6 shadow, strip 54, text at +228, cursor at +232), so more rows need a smaller
+// layout (16 rows at stock sizes overlapped; bars alone shrunk cut through the text, U 16/10/2026). Six constant loads
+// in the Config-only draw functions point at the floats/doubles below instead of the shared .rdata constants:
+//   FUN_008cb530 0x8CB548 FLD [60.0] bar | FUN_008cbae0 0x8CBC7D FLD [54.0] strip, 0x8CBB0C FDIVR [740.0] list
+//   height, 0x8CBB9F / 0x8CBBF1 FADD [228.0] text y, 0x8CBCF3 FADD [232.0] cursor y.
+// With more than 8 visible rows the list is 780 high, bar = spacing - 6, strip = bar - 6, text centred in the bar.
+enum { LAY_BAR, LAY_STRIP, LAY_LIST, LAY_TEXT_A, LAY_TEXT_B, LAY_CURSOR, LAY_N };
+static uint8_t* g_lay_op[LAY_N];                    // address of each site's absolute operand
+static uint32_t g_lay_orig[LAY_N];
+static float    g_bar_h = 60.0f, g_strip_h = 54.0f;
+static double   g_list_h = 740.0, g_text_y = 228.0, g_cursor_y = 232.0;
+static bool     g_lay_patched = false;
+static int      g_vis = 14;
+
+static void set_layout(int vis) {
+    if (vis <= 8 || !g_lay_patched) { g_bar_h = 60.0f; g_strip_h = 54.0f; g_list_h = 740.0; g_text_y = 228.0; g_cursor_y = 232.0; return; }
+    g_list_h = 780.0;
+    double s = g_list_h / vis;
+    double bar = s - 6.0 < 60.0 ? s - 6.0 : 60.0;
+    g_bar_h = (float)bar;
+    g_strip_h = (float)(bar - 6.0);
+    g_text_y = 220.0 + (bar - 43.0) / 2.0;          // stock: bar 60, text at +228 (text about 43 high)
+    if (g_text_y < 220.0) g_text_y = 220.0;
+    g_cursor_y = g_text_y + 4.0;
+}
+
 // ---------------------------------------------------------------- options
 // v = value index as shown: binary rows are ON (0) / OFF (1), the stock order.
-// Frame Rate, highest first, with 0 standing for the game's own 30 fps pacing. A Config row object has room
-// for exactly four values (CfgRow is 0x2C bytes), but the ini accepts any multiple of 30 from 60 to 240, so
-// the four shown are built at install from the rate the player actually asked for - picking 180 in the ini
-// puts 180 on the page. A rate the host limiter cannot be moved to is refused by rate_set_fps, and the row
-// snaps back to what is really in force (row_apply logs it).
-static int k_fps[4] = { 240, 120, 60, 0 };
-static char g_fps_val[4][12];
-static char g_fps_help[4][64];
-
-static void build_fps_values() {
-    int want[4] = { rate_user_fps(), 240, 180, 120 }, n = 0, pick[3];   // the player's rate always survives
-    for (int i = 0; i < 4 && n < 3; i++) {
-        bool dup = false;
-        for (int j = 0; j < n; j++) if (pick[j] == want[i]) dup = true;
-        if (!dup) pick[n++] = want[i];
-    }
-    for (int i = 0; i < n; i++)                                  // highest first
-        for (int j = i + 1; j < n; j++)
-            if (pick[j] > pick[i]) { int t = pick[i]; pick[i] = pick[j]; pick[j] = t; }
-    for (int i = 0; i < 3; i++) k_fps[i] = i < n ? pick[i] : 60;
-    k_fps[3] = 0;
-    for (int i = 0; i < 4; i++) {
-        int f = k_fps[i] ? k_fps[i] : 30;
-        _snprintf_s(g_fps_val[i], sizeof(g_fps_val[i]), _TRUNCATE, "%d", f);
-        _snprintf_s(g_fps_help[i], sizeof(g_fps_help[i]), _TRUNCATE, "%d frames per second.%s", f,
-                    !k_fps[i] ? " The original speed." : f > 60 ? " Needs V-Sync off." : "");
-    }
-}
-static int  get_fps() {
-    if (!g_cfg.pacing) return 3;
-    int f = rate_user_fps();                                     // not a rate PERF-002 stepped down to
-    for (int i = 0; i < 3; i++) if (k_fps[i] == f) return i;
-    for (int i = 0; i < 3; i++) if (k_fps[i] <= f) return i;     // built from it, so this is only a safety net
-    return 2;
-}
-static void set_fps(int v) {
-    if (v < 0 || v > 3) return;
-    if (!k_fps[v]) { pacing_set(false); return; }
-    if (k_fps[v] != rate_user_fps() && !rate_set_fps(k_fps[v])) return;   // refused: pacing is left as it was
-    pacing_set(true);
-}
+// The FPS row is ON / OFF: ON runs at [fps60] fps (60 to 240 in 30 fps steps, see rate.cpp), OFF is the game's
+// own 30 fps pacing. Which rate ON means is an ini setting rather than a row of its own, because a row's label,
+// values and help are text ids generated for eight languages (text/strings.json, tools/gen_text.py) and the
+// numbers would need their own strings. PERF-002 may be running at a lower rate than the one asked for; the
+// row follows what was asked for, not what it stepped to.
+static int  get_fps()     { return g_cfg.pacing ? 0 : 1; }
+static void set_fps(int v) { pacing_set(v == 0); }
 static int  get_smooth()  { return smooth_enabled() ? 0 : 1; }
 static void set_smooth(int v) { smooth_set(v == 0); }
 static int  row_get(Row& r) { return r.on ? 0 : 1; }
@@ -106,56 +110,34 @@ static int  get_reset()   { return row_get(row_SR003); }
 static void set_reset(int v) { row_set(row_SR003, v == 0); }
 static int  get_turbo()   { return row_get(row_DEVTURBO); }
 static void set_turbo(int v) { row_set(row_DEVTURBO, v == 0); }
+static int  get_voice()   { return row_get(row_CLK013); }
+static void set_voice(int v) { row_set(row_CLK013, v == 0); }
+static int  get_saveicon() { return row_QOLSAVEICON.on ? 1 : 0; }                         // ON = stock chocobo shown
+static void set_saveicon(int v) { row_set(row_QOLSAVEICON, v == 1); }
 
-struct Opt {
-    const char* label;
-    const char* vals[4];                            // nullptr = stock ON / OFF text
-    const char* help[4];                            // per value; nullptr = help[0]
+struct Opt {                                        // T_* = text_strings.h ids (text/strings.json, per language)
+    int  label;
+    int  vals[3];                                   // -1 = stock ON / OFF text
+    int  help[3];                                   // per value
     int  nvals;
     int  (*get)();
     void (*set)(int v);
     bool (*enabled)();                              // nullptr = always selectable; else greyed out and skipped when false
 };
 
-static Opt k_opts[] = {
-    { "Frame Rate", {}, {}, 4, get_fps, set_fps },      // values and help built by build_fps_values()
-    { "Smooth Motion", {}, { "Smooth camera and character motion (F7 in game).",
-      "Original camera and character motion." }, 2, get_smooth, set_smooth },
-    { "Sensor (All)", {}, { "All party members have Sensor, no armor needed.",
-      "Sensor from armor only." }, 2, get_sensor, set_sensor },
-    { "AP (All)", {}, { "Party members who did not fight earn AP too.", "Only members who fought earn AP." }, 2,
-      get_ap, set_ap },
-    { "Non-Fighter AP", { "Full", "Half" }, { "Members who did not fight earn full AP.",
-      "Members who did not fight earn half AP." }, 2, get_rate, set_rate, ap_on },
-    { "Battle Retry", {}, { "After a party wipe, choose Retry or Give up.", "Original game over." }, 2,
-      get_retry, set_retry },
-    { "Soft Reset", {}, { "Hold the soft reset buttons to return to the title.", "No soft reset." }, 2,
-      get_reset, set_reset },
-    { "Turbo", {}, { "Hold the turbo key (fps60.ini) to fast-forward.", "No turbo key." }, 2, get_turbo, set_turbo },
+static const Opt k_opts[] = {
+    { T_L_FPS,    { -1, -1 }, { T_H_FPS_ON, T_H_FPS_OFF }, 2, get_fps, set_fps },
+    { T_L_SMOOTH, { -1, -1 }, { T_H_SMOOTH_ON, T_H_SMOOTH_OFF }, 2, get_smooth, set_smooth },
+    { T_L_SENSOR, { -1, -1 }, { T_H_SENSOR_ON, T_H_SENSOR_OFF }, 2, get_sensor, set_sensor },
+    { T_L_AP,     { -1, -1 }, { T_H_AP_ON, T_H_AP_OFF }, 2, get_ap, set_ap },
+    { T_L_NFAP,   { T_V_FULL, T_V_HALF }, { T_H_NFAP_FULL, T_H_NFAP_HALF }, 2, get_rate, set_rate, ap_on },
+    { T_L_RETRY,  { -1, -1 }, { T_H_RETRY_ON, T_H_RETRY_OFF }, 2, get_retry, set_retry },
+    { T_L_RESET,  { -1, -1 }, { T_H_RESET_ON, T_H_RESET_OFF }, 2, get_reset, set_reset },
+    { T_L_TURBO,  { -1, -1 }, { T_H_TURBO_ON, T_H_TURBO_OFF }, 2, get_turbo, set_turbo },
+    { T_L_VOICE,  { -1, -1 }, { T_H_VOICE_ON, T_H_VOICE_OFF }, 2, get_voice, set_voice },     // CLK-013 (opt-in)
+    { T_L_SAVEICON, { -1, -1 }, { T_H_SAVEICON_ON, T_H_SAVEICON_OFF }, 2, get_saveicon, set_saveicon },   // QOL-SAVEICON
 };
 enum { N_OPTS = sizeof(k_opts) / sizeof(k_opts[0]) };
-
-// ---------------------------------------------------------------- FFX text (RETRY-UI-011)
-static const char k_punct[] = " !\"#$%&'()*+,-./:;<=>?";       // 0x3A.. (the quotes are curly in the game font)
-
-static bool encode(const char* s, uint8_t* out, int n) {
-    int i = 0;
-    for (; *s && i < n - 1; s++) {
-        char c = *s;
-        const char* p;
-        if (c >= '0' && c <= '9') out[i++] = (uint8_t)(0x30 + c - '0');
-        else if (c >= 'A' && c <= 'Z') out[i++] = (uint8_t)(0x50 + c - 'A');
-        else if (c >= 'a' && c <= 'z') out[i++] = (uint8_t)(0x70 + c - 'a');
-        else if ((p = strchr(k_punct, c)) != nullptr) out[i++] = (uint8_t)(0x3A + (p - k_punct));
-        else return false;
-    }
-    out[i] = 0;
-    return *s == 0;
-}
-
-static uint8_t g_txt_label[N_OPTS][24];
-static uint8_t g_txt_val[N_OPTS][4][12];
-static uint8_t g_txt_help[N_OPTS][4][64];
 
 static CfgRow g_rows[N_OPTS];
 static void*  g_arr[MAX_STOCK + N_OPTS];
@@ -191,6 +173,32 @@ static void __cdecl row_apply(CfgRow* r) {
 }
 
 // ---------------------------------------------------------------- detours
+static void __cdecl h_draw() {
+    if (g_disabled || !g_row0 || *g_array != (void*)g_arr || g_stock_n <= 0) { set_layout(8); g_draw(); return; }
+    int n = *g_count, vis = n > g_vis ? g_vis : n, cur = *g_cursor;
+    set_layout(vis);
+    if (n <= vis) { g_draw(); return; }
+    if (cur < 0) cur = 0;
+    if (cur >= n) cur = n - 1;
+    if (cur < g_top) g_top = cur;
+    if (cur >= g_top + vis) g_top = cur - vis + 1;
+    if (g_top > n - vis) g_top = n - vis;
+    if (g_top < 0) g_top = 0;
+    int8_t  save_cur = *g_cursor;
+    int32_t save_row0 = *g_row0;
+    *g_array = &g_arr[g_top];
+    *g_count = vis;
+    *g_cursor = (int8_t)(cur - g_top);
+    if (g_top) *g_row0 = -1;                        // row 0 (HD) not in the window: no window slot is it
+    __try { g_draw(); }
+    __finally {
+        *g_array = g_arr;
+        *g_count = n;
+        *g_cursor = save_cur;
+        *g_row0 = save_row0;
+    }
+}
+
 static void __cdecl h_enter(void* desc) {
     if (!g_disabled && row_CFGMENU.on) {
         __try {
@@ -198,6 +206,7 @@ static void __cdecl h_enter(void* desc) {
             int   n = *g_count;
             if (cur == (void*)g_arr) { cur = g_stock; n = g_stock_n; }   // entered again with ours still in place
             else { g_stock = cur; g_stock_n = n; }
+            g_top = 0;
             if (cur && n > 0 && n <= MAX_STOCK) {
                 memcpy(g_arr, cur, n * sizeof(void*));
                 for (int i = 0; i < N_OPTS; i++) g_arr[n + i] = &g_rows[i];
@@ -219,12 +228,12 @@ static void __cdecl h_enter(void* desc) {
 
 static uint8_t* lookup(uint32_t id, bool help) {
     id &= 0xFFFF;
-    if (id >= ID_LABEL && id < ID_LABEL + N_OPTS && !help) return g_txt_label[id - ID_LABEL];
+    if (id >= ID_LABEL && id < ID_LABEL + N_OPTS && !help) return (uint8_t*)ffx_text(k_opts[id - ID_LABEL].label);
     if (id >= ID_VALUE && id < ID_VALUE + N_OPTS * 4) {
         int i = (id - ID_VALUE) / 4, v = (id - ID_VALUE) % 4;
         if (v >= k_opts[i].nvals) v = 0;
-        if (help) return g_txt_help[i][v];
-        if (k_opts[i].vals[v]) return g_txt_val[i][v];
+        if (help) return (uint8_t*)ffx_text(k_opts[i].help[v]);
+        if (k_opts[i].vals[v] >= 0) return (uint8_t*)ffx_text(k_opts[i].vals[v]);
         return g_label(v == 0 ? ID_ON : ID_OFF);
     }
     return nullptr;
@@ -244,19 +253,15 @@ static uint8_t* __cdecl h_help(uint32_t id) {
 static void write_ini() {
     g_dirty = false;
     const char* on01[2] = { "1", "0" };              // v 0 = ON
-    int fv = get_fps();
-    config_write("fps60", "pacing", k_fps[fv] ? "1" : "0");
-    if (k_fps[fv]) {
-        char fb[8];
-        _snprintf_s(fb, sizeof(fb), _TRUNCATE, "%d", k_fps[fv]);
-        config_write("fps60", "fps", fb);
-    }
+    config_write("fps60", "pacing", on01[get_fps()]);
     config_write("rows", "SMOOTH", on01[get_smooth()]);
     config_write("rows", "QOL-SENSOR", on01[get_sensor()]);
     config_write("rows", "QOL-AP", on01[get_ap()]);
     if (ap_on()) config_write("rows", "QOL-AP-RATE", get_rate() == 0 ? "100" : "50");
     config_write("rows", "QOL-RETRY", on01[get_retry()]);
     config_write("rows", "DEV-TURBO", on01[get_turbo()]);
+    config_write("rows", "CLK-013", on01[get_voice()]);
+    config_write("rows", "QOL-SAVEICON", get_saveicon() ? "1" : "0");
     // soft_reset holds the chord: keep it when on, unless it is the off value
     char b[96];
     config_str("fps60", "soft_reset", b, sizeof(b), "");
@@ -264,7 +269,8 @@ static void write_ini() {
     if (get_reset() == 1) config_write("fps60", "soft_reset", "0");
     else if (off_now && b[0]) config_write("fps60", "soft_reset", "L1+L2+R1+R2+START+SELECT");
     log_line("CFG-MENU: fps60.ini written (0 = on: fps %d, smooth %d, sensor %d, ap %d rate %d, retry %d, reset %d, turbo %d)",
-             k_fps[fv] ? k_fps[fv] : 30, get_smooth(), get_sensor(), get_ap(), get_rate(), get_retry(), get_reset(), get_turbo());
+             get_fps() ? 30 : rate_user_fps(), get_smooth(), get_sensor(), get_ap(), get_rate(), get_retry(),
+             get_reset(), get_turbo());
 }
 
 // ---------------------------------------------------------------- row
@@ -292,27 +298,57 @@ static bool install() {
     g_count = (volatile int32_t*)read_abs(g_enter_fn + 0x23);
     g_array = (void* volatile*)read_abs(g_enter_fn + 0x31);
     if (!g_cursor || !g_count || !g_array) return false;
-
-    build_fps_values();
-    for (int i = 0; i < 4; i++) {
-        k_opts[0].vals[i] = g_fps_val[i];
-        k_opts[0].help[i] = g_fps_help[i];
+    if (config_row("CFG-MENU-SCROLL", 1)) {
+        // Cfg_DrawRows: PUSH ESI; CALL; XOR ESI,ESI; CMP [count],ESI; JLE; loop { PUSH ESI; PUSH 0; PUSH 0; CALL row; ...}
+        g_draw_fn = sig_find_unique("CFG-MENU-SCROLL Cfg_DrawRows",
+            "56 E8 ?? ?? ?? ?? 33 F6 39 35 ?? ?? ?? ?? 7E 1B 56 6A 00 6A 00 E8 ?? ?? ?? ?? 83 C4 0C E8 ?? ?? ?? ?? 46 3B 35", 0x8CBAB0);
+        g_vis = config_row("CFG-MENU-ROWS", 14);
+        if (g_vis < 8) g_vis = 8;
+        if (g_vis > 16) g_vis = 16;
+        // Layout sites (CFG-MENU-ROWS > 8): pattern, expected VA, operand offset, expected constant
+        struct Site { const char* name; const char* pat; uint32_t va; int op; bool dbl; double val; };
+        static const Site k_sites[LAY_N] = {
+            { "bar height", "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 5D FC 83 C4 04 D9 45 FC D8 45 0C 68 00 00 00 26",
+              0x8CB548, 2, false, 60.0 },
+            { "strip height", "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 DD 85 D0 FD FF FF",
+              0x8CBC7D, 2, false, 54.0 },
+            { "list height", "DB 05 ?? ?? ?? ?? 53 56 8B 75 10 D9 9D F4 FD FF FF 57 D9 85 F4 FD FF FF 56 DC 3D ?? ?? ?? ??",
+              0x8CBAF3, 0x1B, true, 740.0 },
+            { "text y (HD row)", "50 68 CD 01 00 00 E8 ?? ?? ?? ?? DD 85 D0 FD FF FF DC 05 ?? ?? ?? ?? D9 9D F8 FD FF FF",
+              0x8CBB8E, 0x13, true, 228.0 },
+            { "text y", "8D 85 FC FD FF FF EB 57 DD 85 D0 FD FF FF 83 EC 08 DC 05 ?? ?? ?? ?? D9 9D F8 FD FF FF",
+              0x8CBBE0, 0x13, true, 228.0 },
+            { "cursor y", "3B F0 75 40 DD 85 D0 FD FF FF 6A 00 DC 05 ?? ?? ?? ?? 51", 0x8CBCE7, 0x0E, true, 232.0 },
+        };
+        bool lay_ok = g_vis > 8;
+        for (int i = 0; i < LAY_N && lay_ok; i++) {
+            char nm[64];
+            _snprintf_s(nm, sizeof(nm), _TRUNCATE, "CFG-MENU-ROWS %s", k_sites[i].name);
+            uint8_t* at = sig_find_unique(nm, k_sites[i].pat, k_sites[i].va);
+            uint8_t* c = at ? read_abs(at + k_sites[i].op) : nullptr;
+            double v = !c ? -1.0 : k_sites[i].dbl ? *(double*)c : (double)*(float*)c;
+            if (!at || v != k_sites[i].val) {
+                log_line("  CFG-MENU-ROWS: %s not found or constant %.1f != %.1f - stock layout, 8 rows", k_sites[i].name, v, k_sites[i].val);
+                lay_ok = false;
+                break;
+            }
+            g_lay_op[i] = at + k_sites[i].op;
+            g_lay_orig[i] = *(uint32_t*)g_lay_op[i];
+        }
+        if (!lay_ok) { g_vis = 8; for (auto& op : g_lay_op) op = nullptr; }
+        // Cfg_DrawRow 0x8CBB7D: ADD ESP,8; CMP ESI,[row0]; JNZ +0x60; LEA EAX,[EBP-0x204]; PUSH EAX; PUSH 0x1CD; CALL
+        uint8_t* r0 = sig_find_unique("CFG-MENU-SCROLL HD row test",
+            "83 C4 08 3B 35 ?? ?? ?? ?? 75 60 8D 85 FC FD FF FF 50 68 CD 01 00 00 E8", 0x8CBB7D);
+        if (g_draw_fn && r0 && (volatile int32_t*)read_abs(r0 + 5) && read_abs(g_draw_fn + 10) == (uint8_t*)(uintptr_t)g_count) {
+            g_row0 = (volatile int32_t*)read_abs(r0 + 5);
+        } else {
+            g_draw_fn = nullptr;
+            log_line("  CFG-MENU-SCROLL: row draw not found - all rows on one page");
+        }
     }
+
     for (int i = 0; i < N_OPTS; i++) {
         const Opt& o = k_opts[i];
-        bool ok = encode(o.label, g_txt_label[i], sizeof(g_txt_label[i]));
-        for (int v = 0; v < o.nvals; v++) {
-            if (o.vals[v]) ok = encode(o.vals[v], g_txt_val[i][v], sizeof(g_txt_val[i][v])) && ok;
-            ok = encode(o.help[v] ? o.help[v] : o.help[0], g_txt_help[i][v], sizeof(g_txt_help[i][v])) && ok;
-        }
-        if (!ok) {
-            log_line("  CFG-MENU: text for '%s' does not fit (label %d/%d, value %d/%d, help %d/%d bytes, or a "
-                     "character outside the FFX charset) - refused", o.label, (int)strlen(o.label),
-                     (int)sizeof(g_txt_label[i]) - 1, o.vals[0] ? (int)strlen(o.vals[0]) : 0,
-                     (int)sizeof(g_txt_val[i][0]) - 1, o.help[0] ? (int)strlen(o.help[0]) : 0,
-                     (int)sizeof(g_txt_help[i][0]) - 1);
-            return false;
-        }
         CfgRow& r = g_rows[i];
         memset(&r, 0, sizeof(r));
         r.nvals = o.nvals;
@@ -322,7 +358,7 @@ static bool install() {
         r.label = ID_LABEL + i;
         for (int v = 0; v < o.nvals; v++) r.vals[v] = ID_VALUE + i * 4 + v;
     }
-    log_line("  CFG-MENU: Frame Rate row shows %d / %d / %d / 30 fps", k_fps[0], k_fps[1], k_fps[2]);
+    ffx_text_init();
     log_line("  CFG-MENU: enter gva=0x%08X label gva=0x%08X help gva=0x%08X; cursor 0x%08X count 0x%08X array 0x%08X; %d rows",
              rt_to_gva_exe(g_enter_fn), rt_to_gva_exe(g_label_fn), rt_to_gva_exe(g_help_fn), rt_to_gva_exe((void*)g_cursor),
              rt_to_gva_exe((void*)g_count), rt_to_gva_exe((void*)g_array), N_OPTS);
@@ -337,11 +373,26 @@ static void pre() {
             !hook_entry("CFG-MENU enter", g_enter_fn, (void*)&h_enter, (void**)&g_enter)) {
             hook_remove("CFG-MENU label", g_label_fn);
             hook_remove("CFG-MENU help", g_help_fn);
+            hook_remove("CFG-MENU enter", g_enter_fn);
             log_line("CFG-MENU: hook failed - row off");
             row_CFGMENU.on = 0;
             return;
         }
         log_line("CFG-MENU: Config page hooked on the game thread");
+        if (g_draw_fn && !hook_entry("CFG-MENU-SCROLL draw", g_draw_fn, (void*)&h_draw, (void**)&g_draw)) g_row0 = nullptr;
+        else if (g_draw_fn) {
+            if (g_lay_op[0]) {
+                void* tgt[LAY_N] = { &g_bar_h, &g_strip_h, &g_list_h, &g_text_y, &g_text_y, &g_cursor_y };
+                bool ok = true;
+                for (int i = 0; i < LAY_N; i++) {
+                    uint32_t v = (uint32_t)(uintptr_t)tgt[i];
+                    ok = patch_write(g_lay_op[i], &v, 4) && ok;
+                }
+                g_lay_patched = ok;
+                if (!ok) { log_line("CFG-MENU-ROWS: layout patch failed - 8 rows"); g_vis = 8; }
+            }
+            log_line("CFG-MENU-SCROLL: %d rows visible, the list scrolls with the cursor", g_vis);
+        }
     }
     if (g_dirty && g_desc_state && *g_desc_state > 3) write_ini();
 }
@@ -349,6 +400,10 @@ static void pre() {
 // Dev hot reload / off: the stock row list back (the game must not keep pointers into this copy), unsaved changes
 // written.
 static void stop() {
+    if (g_lay_patched) {
+        g_lay_patched = false;
+        for (int i = 0; i < LAY_N; i++) if (g_lay_op[i]) patch_write(g_lay_op[i], &g_lay_orig[i], 4);
+    }
     __try {
         if (g_array && *g_array == (void*)g_arr && g_stock) { *g_array = g_stock; *g_count = g_stock_n; *g_cursor = 0; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -357,6 +412,6 @@ static void stop() {
 
 Row row_CFGMENU = {
     "CFG-MENU",
-    "mod options (Frame Rate, Smooth, Sensor, AP, Non-Fighter AP, Retry, Soft Reset, Turbo) as rows of the game's Config page",
+    "mod options (60 FPS, Smooth, Sensor, AP, Non-Fighter AP, Retry, Soft Reset, Turbo, Voice Sync, Autosave Chocobo) as rows of the game's Config page",
     1, install, pre, nullptr, 0, stop
 };

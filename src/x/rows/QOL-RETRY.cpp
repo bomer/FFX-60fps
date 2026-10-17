@@ -16,6 +16,9 @@
 //   is detoured: the snapshot is restored and it returns 1 without the title or post-battle path. The next
 //   invocation re-writes the request (a9d4 is zeroed at 0x790EF2 after the call), and the field branch starts the same
 //   battle. If no battle starts within 60 invocations, the original FUN_00861160 runs with the saved arguments.
+// - QOL-RETRY-MAPFX (default 1): the field map stays loaded across a retry, so map particle state a battle changed
+//   stays changed (Yunalesca: her ground sigil, map particle 13, hidden and dimmed; the retry started with a dark ring,
+//   U 18/10/2026). Each map particle's control flags and RGBA are copied at battle setup and written back on Retry.
 #include "../fps60.h"
 #include <string.h>
 
@@ -71,11 +74,67 @@ static int      g_prompt_inv = 0;                    // invocations since the pr
 static bool     g_prompt_seen = false;               // the window left state 0/4 at least once
 static bool     g_chord = true;                     // QOL-RETRY-CHORD: prompt after the SR-008 soft-reset chord too
 
-// FFX charset: {09 30}{10 30}Retry{03}{10 31}Give up{00} (stock save-sphere layout, RETRY-UI-012; A=0x50, a=0x70,
-// space 0x3A, line feed 0x03)
-static const uint8_t k_text[] = { 0x09, 0x30, 0x10, 0x30, 0x61, 0x74, 0x83, 0x81, 0x88, 0x03,
-                                  0x10, 0x31, 0x56, 0x78, 0x85, 0x74, 0x3A, 0x84, 0x7F, 0x00 };
+// {09 30}{10 30}Retry{03}{10 31}Give up{00} (stock save-sphere layout, RETRY-UI-012; line feed 0x03), the words in the
+// current text language (text.cpp), built when the prompt opens.
+static uint8_t g_text[96];
+
+static void build_text() {
+    static const uint8_t head[] = { 0x09, 0x30, 0x10, 0x30 }, mid[] = { 0x03, 0x10, 0x31 };
+    const char* a = (const char*)ffx_text(T_P_RETRY);
+    const char* b = (const char*)ffx_text(T_P_GIVEUP);
+    size_t la = strlen(a), lb = strlen(b), n = 0;
+    if (sizeof(head) + la + sizeof(mid) + lb + 1 > sizeof(g_text)) { a = b = ""; la = lb = 0; }
+    memcpy(g_text + n, head, sizeof(head)); n += sizeof(head);
+    memcpy(g_text + n, a, la); n += la;
+    memcpy(g_text + n, mid, sizeof(mid)); n += sizeof(mid);
+    memcpy(g_text + n, b, lb); n += lb;
+    g_text[n] = 0;
+}
 static int g_style = 0;                             // QOL-RETRY-STYLE: 0 field dialogue (choices), 1 battle caption
+
+// Map particle programs (re/ledger/FX.md FX-010; D 18/10/2026 03:33/03:38 retry diffs, U 04:06 fixed): count
+// *(u16*)([0x00D2C258] + 4); control table 0x00D30260 + i * 0x4C, dword +0 flags, bit 0x10 = hidden (set by
+// FUN_00729400 / FUN_00729570, cleared by FUN_00729440); program table 0x00D2C260 + i * 0x80, +0x70 RGBA as four u16
+// (0x1000 = 1.0). Yunalesca's fight leaves particle 13 at flags 0x10, RGBA 0800 0800 0800 1000 (battle start: 0,
+// 1000 1000 1000 1000) and particles 15/16 at flags 0 (start: 1).
+enum { MAPFX_MAX = 128 };
+static int        g_mapfx = 1;
+static uint8_t**  g_mapfx_hdr = nullptr;            // [0x00D2C258]
+static uint8_t*   g_mapfx_ctl = nullptr;            // 0x00D30260
+static uint8_t*   g_mapfx_prog = nullptr;           // 0x00D2C260
+static int        g_mapfx_n = 0;
+static uint32_t   g_mapfx_flags[MAPFX_MAX];
+static uint64_t   g_mapfx_rgba[MAPFX_MAX];
+
+static void mapfx_take() {
+    g_mapfx_n = 0;
+    uint8_t* hdr = *g_mapfx_hdr;
+    if (!hdr) return;
+    int n = *(uint16_t*)(hdr + 4);
+    if (n > MAPFX_MAX) n = MAPFX_MAX;
+    for (int i = 0; i < n; i++) {
+        g_mapfx_flags[i] = *(uint32_t*)(g_mapfx_ctl + i * 0x4C);
+        g_mapfx_rgba[i] = *(uint64_t*)(g_mapfx_prog + i * 0x80 + 0x70);
+    }
+    g_mapfx_n = n;
+}
+
+static void mapfx_put() {
+    uint8_t* hdr = *g_mapfx_hdr;
+    if (!hdr || *(uint16_t*)(hdr + 4) < g_mapfx_n) {
+        log_line("QOL-RETRY-MAPFX: map particle list changed since battle setup - left as is");
+        return;
+    }
+    for (int i = 0; i < g_mapfx_n; i++) {
+        uint32_t* fl = (uint32_t*)(g_mapfx_ctl + i * 0x4C);
+        uint64_t* c = (uint64_t*)(g_mapfx_prog + i * 0x80 + 0x70);
+        if (*fl == g_mapfx_flags[i] && *c == g_mapfx_rgba[i]) continue;
+        log_line("QOL-RETRY-MAPFX: map particle %d flags %08X -> %08X, rgba %016llX -> %016llX", i, *fl, g_mapfx_flags[i],
+                 *c, g_mapfx_rgba[i]);
+        *fl = g_mapfx_flags[i];
+        *c = g_mapfx_rgba[i];
+    }
+}
 
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
@@ -86,6 +145,7 @@ static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
             for (int i = 0; i < 3; i++) g_snap_b48[i] = g_b48[k_b48_idx[i]];
             g_snap_a8e2 = *g_a8e2; g_snap_c256 = *g_c256; g_snap_c258 = *g_c258; g_snap_c259 = *g_c259;
             g_snap_a9d4 = *g_a9d4; g_snap_a9d5 = *g_a9d5;
+            if (g_mapfx) mapfx_take();
             g_snap_ok = true;
             if (g_reissue) log_line("QOL-RETRY: retry battle starts (area %d group %d form %d)", area, group, form);
             else log_line("QOL-RETRY: snapshot at battle start (area %d group %d form %d, scripted %d, b48 0x%08X)",
@@ -116,6 +176,7 @@ static int __cdecl h_post(int scripted, uint32_t key, int stage, int result) {
         g_retry = false;
         __try {
             restore();
+            if (g_mapfx) mapfx_put();
             rearm_request();
             g_post_args[0] = scripted; g_post_args[1] = (int)key; g_post_args[2] = stage; g_post_args[3] = result;
             g_reissue = 1;
@@ -163,7 +224,8 @@ static void open_prompt() {
     // one line ("Retry: Title") and took no input (U 16/10/2026).
     if (g_style == 1) g_w_style(WIN, 1, 0x2402);
     else g_w_style(WIN, 0, 0);
-    g_w_text(WIN, (int)(uintptr_t)k_text, (int)(uintptr_t)k_text);
+    build_text();
+    g_w_text(WIN, (int)(uintptr_t)g_text, (int)(uintptr_t)g_text);
     g_w_anchor(WIN, 4, 0x100, 0xE0);
     g_w_anchor2(WIN, g_style == 1 ? 4 : WIN);
     g_w_focus(WIN);
@@ -288,6 +350,11 @@ static void pre() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("QOL-RETRY: fault 0x%08lX in pre - row off", GetExceptionCode());
         row_QOLRETRY.on = 0;
+        // Release the prompt: the busy and focus detours stay installed and hold slot 7 while g_state == ST_PROMPT. In
+        // the one fault seen (a diagnostic, 18/10/2026 03:18) the battle still hung after this release.
+        if (g_state == ST_PROMPT) { __try { g_w_close(WIN); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+        g_state = ST_IDLE;
+        g_retry = false;
     }
 }
 
@@ -300,8 +367,10 @@ static void stop() {                                 // dev hot reload: close ou
 #define NEED(x) do { if (!(x)) { log_line("  QOL-RETRY: " #x " not resolved - refused"); return false; } } while (0)
 
 static bool install() {
+    ffx_text_init();
     g_chord = config_row("QOL-RETRY-CHORD", 1) != 0;
     g_style = config_row("QOL-RETRY-STYLE", 0);
+    g_mapfx = config_row("QOL-RETRY-MAPFX", 1);
     g_setup_fn = sig_find_unique("QOL-RETRY MsBattleSetupEncounter",
         "55 8B EC 53 56 57 E8 ?? ?? ?? ?? 8B 5D 08 85 C0 74 28 85 DB 75 37 68", 0x781020);
     g_post_fn = sig_find_unique("QOL-RETRY post-battle FUN_00861160",
@@ -366,6 +435,26 @@ static bool install() {
     NEED(g_c256 && g_c258 && g_c259 && g_a9d4 && g_a8e2 && g_a9d5 && g_a8e0 && g_a8e3 && g_c9ec && g_b48);
     NEED(g_save && g_reward && g_choice_tbl && g_win_tbl);
     NEED(g_save_len > 0 && g_save_len <= SAVE_MAX);
+
+    if (g_mapfx) {
+        // FUN_00729400 (hide map particle by id): MOV EDX,[hdr] +5; MOV EAX,ctl +0x12; ... OR [EAX],0x10; ADD EAX,0x4C.
+        // FUN_00729530 (stop by id): MOV EAX,prog +0x12; ... SUB EAX,-0x80. One match each in fps60_image.bin.
+        uint8_t* hide = sig_find_unique("QOL-RETRY map particle hide FUN_00729400",
+            "55 8B EC 8B 15 ?? ?? ?? ?? 85 D2 74 29 0F B7 4A 04 B8 ?? ?? ?? ?? 85 C9 74 1C 56 66 8B 75 08 83 C2 66 49 66 "
+            "39 32 75 03 83 08 10 83 C2 50 83 C0 4C", 0x729400);
+        uint8_t* stop = sig_find_unique("QOL-RETRY map particle stop FUN_00729530",
+            "55 8B EC 8B 15 ?? ?? ?? ?? 85 D2 74 30 0F B7 4A 04 B8 ?? ?? ?? ?? 85 C9 74 23 56 66 8B 75 08 83 C2 66 49 66 "
+            "39 32 75 0A C7 00 00 00 00 00 C6 40 1D 00 83 C2 50 83 E8 80", 0x729530);
+        if (hide && stop) {
+            g_mapfx_hdr = (uint8_t**)read_abs(hide + 5);
+            g_mapfx_ctl = read_abs(hide + 0x12);
+            g_mapfx_prog = read_abs(stop + 0x12);
+        }
+        if (!g_mapfx_hdr || !g_mapfx_ctl || !g_mapfx_prog || read_abs(stop + 5) != (uint8_t*)g_mapfx_hdr) {
+            log_line("  QOL-RETRY: map particle tables not resolved - QOL-RETRY-MAPFX off");
+            g_mapfx = 0;
+        }
+    }
     NEED(g_a8e2 == g_a8e0 + 2 && g_a8e3 == g_a8e0 + 3);   // one battle-state struct (0x0112A8D0 +0x10..)
 
     g_w_reset   = (w1_t)call_target(bt + 0x08);
@@ -386,6 +475,9 @@ static bool install() {
              "a8e0 gva=0x%08X, c9ec gva=0x%08X, choices gva=0x%08X", rt_to_gva_exe(g_setup_fn), rt_to_gva_exe(g_post_fn),
              rt_to_gva_exe(g_save), g_save_len, rt_to_gva_exe(g_reward), rt_to_gva_exe((void*)g_b48),
              rt_to_gva_exe((void*)g_a8e0), rt_to_gva_exe((void*)g_c9ec), rt_to_gva_exe(g_choice_tbl));
+    if (g_mapfx)
+        log_line("  QOL-RETRY-MAPFX: map particle header gva=0x%08X, control table gva=0x%08X, program table gva=0x%08X",
+                 rt_to_gva_exe(g_mapfx_hdr), rt_to_gva_exe(g_mapfx_ctl), rt_to_gva_exe(g_mapfx_prog));
     log_line("  QOL-RETRY: window fns reset 0x%08X style 0x%08X text 0x%08X anchor 0x%08X/0x%08X focus 0x%08X open 0x%08X "
              "choice 0x%08X state 0x%08X close 0x%08X colour 0x%08X",
              rt_to_gva_exe((void*)g_w_reset), rt_to_gva_exe((void*)g_w_style), rt_to_gva_exe((void*)g_w_text),

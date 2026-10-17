@@ -4,7 +4,8 @@
 // logic instead: Menu_CoroutineIterate 0x7645E0 alternates logic and render-only passes.
 //   render-only pass: the step gate CALL 0x51C100 (0x764824) returns 0x7FFFFFFF so the step block is skipped; the
 //     always-run task step CALL Menu_TasksStep(1) (0x764894) is skipped; the cursor counter INC [0x1CCE9B8]
-//     (0x76473A, before the gate) is undone at the gate; the fade ramp [0x16BDCE8] (0x7649BB, after the draws that read
+//     (0x76473A, before the gate) is undone at the gate, and so is INC byte [0x16BC586] (0x764734; X2-MENU-002-PARITY:
+//     the Items->Use item/target cursors blink and animate from it, U 16/10/2026 "blink twice as fast", ITEM-CURSOR.md); the fade ramp [0x16BDCE8] (0x7649BB, after the draws that read
 //     it) is put back after the pass.
 // Logic / render-only = the pacing core's alternation (render_only()), so X2-UI-017's pad latch lands on logic passes.
 //   logic pass: everything runs; the slides are 16-byte tween records stepped by Tween_Step 0x772EB0 (value +0xE,
@@ -25,6 +26,8 @@ static gate_t       g_gate = nullptr;            // 0x51C100 turbo factor
 static tasks_t      g_tasks = nullptr;           // 0x764170 Menu_TasksStep
 static tween_step_t g_tween_step = nullptr;      // trampoline of 0x772EB0
 static volatile int32_t*  g_counter = nullptr;   // 0x01CCE9B8 cursor / blink counter
+static volatile uint8_t*  g_parity = nullptr;    // 0x016BC586 menu parity byte: item-use cursor clock (ITEM-CURSOR.md)
+static int                g_t_parity = 1;        // [rows] X2-MENU-002-PARITY
 static volatile int32_t*  g_fade = nullptr;      // 0x016BDCE8 fade ramp value
 static volatile int32_t*  g_up = nullptr;        // 0x016BC55C menu in progress
 static volatile int32_t*  g_up2 = nullptr;       // 0x016BC560
@@ -42,11 +45,15 @@ static TweenRec g_rec[256];
 static int g_nrec = 0;
 extern Row row_MENU002;
 
-static bool main_menu_mode(uint32_t m) { m &= 0xFFFF0000u; return m == 0 || m == 0x04000000u; }
+// Field main menu = mode 0 (pad open, Sg_MenuRequestTest 0x604E67). Mode 0x4000000 is the BATTLE pause menu: requested
+// by FUN_0061e440 (0x61E5DA) on Start while battle state [0xDF68A0] == 1. Claiming it ran the pause menu at 60 Hz with
+// its logic halved and crashed (friend's log 16/10/2026 09:15, "crash when he pause the game in combat").
+static bool main_menu_mode(uint32_t m) { return (m & 0xFFFF0000u) == 0; }
+static bool g_battle_menu = false;   // a 0x4000000 request was seen; never claim until every menu is closed
 
 // Parts, each with an ini key and a numpad hotkey (game window focused, logged). U 14/10/2026: "hotkey to turn on/off
 // each of them mid game so i can choose what to keep".
-//   Num 0  X2-MENU-002           the whole row (off = X2-MENU-001 stock pacing, 30 fps menu)
+//   Num 9  X2-MENU-002           the whole row (off = X2-MENU-001 stock pacing, 30 fps menu)
 //   Num 1  X2-MENU-002-TWEEN     tween slides drawn half-way (Tween_GetValue / Tween_GetPhase)
 //   Num 2  X2-MENU-002-DRAWREPLAY task draw-phase replay (panel shadows)
 //   Num 3  X2-MENU-002-POINT     screen point [0x16BC550]/[0x16BC554] (eased by tweens 0x16BDA80/90 in FUN_00761f30,
@@ -57,6 +64,11 @@ static bool main_menu_mode(uint32_t m) { m &= 0xFFFF0000u; return m == 0 || m ==
 // the step (at the gate) and after it (task step) for the draws, and puts the stepped value back after the pass
 // (only if it still holds our midpoint).
 static int g_user_on = 1, g_t_tween = 1, g_t_point = 1, g_t_backdrop = 1;
+bool menu002_user_on() { return row_MENU002.on && g_user_on; }
+void menu002_set_user(bool on) {                  // X2-CFG-MENU: same switch as Num 9 (needs the row installed)
+    if (on && !row_set(row_MENU002, true)) return;
+    g_user_on = on ? 1 : 0;
+}
 static int g_drawreplay = 1;
 
 struct BlendVar { volatile uint8_t* p; int size; bool sgn; int* toggle; int32_t pre, post, mid; bool wrote; };
@@ -80,7 +92,7 @@ static void add_var(uint8_t* p, int size, bool sgn, int* toggle) {
 
 struct Hotkey { int vk; int* flag; const char* name; bool prev; };
 static Hotkey g_keys[] = {
-    { VK_NUMPAD0, &g_user_on,    "X2-MENU-002 (60 fps main menu)", false },
+    { VK_NUMPAD9, &g_user_on,    "X2-MENU-002 (60 fps main menu)", false },
     { VK_NUMPAD1, &g_t_tween,    "X2-MENU-002-TWEEN (slides)", false },
     { VK_NUMPAD2, &g_drawreplay, "X2-MENU-002-DRAWREPLAY (shadows)", false },
     { VK_NUMPAD3, &g_t_point,    "X2-MENU-002-POINT (screen point)", false },
@@ -106,7 +118,9 @@ static void poll_hotkeys() {
 bool menu002_claims() {
     if (!row_MENU002.on || !g_user_on || g_disabled || !g_cfg.pacing || !g_up) return false;
     int32_t req = *g_req;
-    if (*g_up == 0 && *g_up2 == 0 && req == -1) return false;   // no menu up or requested
+    if (*g_up == 0 && *g_up2 == 0 && req == -1) { g_battle_menu = false; return false; }   // no menu up or requested
+    if (req != -1 && ((uint32_t)req & 0xFFFF0000u) == 0x04000000u) g_battle_menu = true;
+    if (g_battle_menu) return false;                                // battle pause menu: X2-MENU-001 holds stock
     return req != -1 ? main_menu_mode((uint32_t)req) : main_menu_mode(*g_mode);
 }
 
@@ -129,6 +143,7 @@ static int __cdecl h_gate() {
     g_pass_render = true;
     InterlockedIncrement(&g_render_passes);
     (*g_counter)--;                                   // undo this pass's INC (0x76473A ran before the gate)
+    if (g_t_parity) (*g_parity)--;                    // and INC byte [0x16BC586] (0x764734): Items->Use cursors
     g_fade_saved = *g_fade;                           // restored after the pass (post)
     g_fade_saved_ok = true;
     return 0x7FFFFFFF;                                // CMP [0xDF6414],EAX; JL -> step block skipped
@@ -282,8 +297,9 @@ static bool install() {
     g_req = test && sig_match(test, "8B 0D") ? (volatile int32_t*)abs_operand("menu request", test + 2) : nullptr;
     g_mode = (volatile uint32_t*)abs_operand("menu mode", co + 0x1A);
     g_counter = (volatile int32_t*)abs_operand("cursor counter", cn + 8);
+    g_parity = (volatile uint8_t*)abs_operand("menu parity byte", cn + 2);
     g_fade = (volatile int32_t*)abs_operand("fade value", fd + 1);
-    if (!g_up || !g_up2 || !g_req || !g_mode || !g_counter || !g_fade ||
+    if (!g_up || !g_up2 || !g_req || !g_mode || !g_counter || !g_parity || !g_fade ||
         *(const uint32_t*)(fd + 0x15) != (uint32_t)(uintptr_t)g_fade) {
         log_line("  X2-MENU-002: menu globals not as proven - refused");
         return false;
@@ -313,6 +329,7 @@ static bool install() {
     }
     g_task0 = first - 0xC;
     g_drawreplay = config_row("X2-MENU-002-DRAWREPLAY", 1);
+    g_t_parity = config_row("X2-MENU-002-PARITY", 1);
     g_t_tween = config_row("X2-MENU-002-TWEEN", 1);
     g_t_point = config_row("X2-MENU-002-POINT", 1);
     g_t_backdrop = config_row("X2-MENU-002-BACKDROP", 1);

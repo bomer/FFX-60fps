@@ -21,6 +21,14 @@ void config_load() {
     g_cfg.log_pacing_events = GetPrivateProfileIntW(L"x2", L"log_pacing_events", 1, g_ini);
 }
 
+bool config_write(const char* sect, const char* key, const char* value) {
+    wchar_t s[32], k[64], v[96];
+    _snwprintf_s(s, 32, _TRUNCATE, L"%S", sect);
+    _snwprintf_s(k, 64, _TRUNCATE, L"%S", key);
+    _snwprintf_s(v, 96, _TRUNCATE, L"%S", value);
+    return WritePrivateProfileStringW(s, k, v, g_ini) != 0;
+}
+
 // ASCII string key (wide API: the game path may hold non-ANSI characters).
 void config_str(const char* sect, const char* key, char* out, int size, const char* def) {
     wchar_t s[32], k[64], d[96], v[96];

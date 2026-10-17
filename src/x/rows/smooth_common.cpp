@@ -27,7 +27,7 @@ void smooth_poll_hotkey() {
     // Dev hotkey Num 2 bisects: SMOOTH-001 off -> SMOOTH-002 off -> SMOOTH-003 off -> none (U 12/10/2026: one-frame
     // boss ghost in the Echuilles battle, gone with F7).
     static bool prev2 = false;
-    if (dev_key(VK_NUMPAD2, &prev2)) {
+    if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000) && dev_key(VK_NUMPAD2, &prev2)) {
         g_off_row = (g_off_row + 1) % 4;
         if (g_off_row) log_line("Num2: only SMOOTH-00%ld off (others %s)", g_off_row, g_live ? "on" : "off by F7");
         else log_line("Num2: all SMOOTH rows follow F7 (%s)", g_live ? "on" : "off");
@@ -132,6 +132,20 @@ bool smooth_interp(const float* a, const float* b, float t, float cut_dist, floa
     if (!is_affine(a) || !is_affine(b)) return false;
     float d[3] = { b[12] - a[12], b[13] - a[13], b[14] - a[14] };
     if (dot3(d, d) > cut_dist * cut_dist) return false;           // warp / camera cut: no sweep
+    // Same 3x3 in both ticks: keep it bit-exact and lerp the translation only. The quaternion round trip below
+    // rebuilds the basis (orthonormal x row lengths); for a basis that is not exactly that (shear, rounding) the
+    // rebuilt one differs, so a static actor was drawn with a slightly different matrix on logic frames than on
+    // render-only frames (U 17/10/2026: save sphere ring, id 0x5001, scale 0.001, bright/dark every frame).
+    bool same3 = true;
+    for (int r = 0; r < 3 && same3; r++)
+        for (int c = 0; c < 4; c++) if (a[r * 4 + c] != b[r * 4 + c]) { same3 = false; break; }
+    if (same3) {
+        float o[16];
+        memcpy(o, b, 64);
+        for (int k = 0; k < 3; k++) o[12 + k] = a[12 + k] + t * d[k];
+        for (int i = 0; i < 16; i++) { if (!isfinite(o[i])) return false; out[i] = o[i]; }
+        return true;
+    }
     float la[3], lb[3], A[9], B[9];
     for (int r = 0; r < 3; r++) {
         la[r] = sqrtf(dot3(a + r * 4, a + r * 4));
@@ -181,5 +195,26 @@ bool smooth_interp_view(const float* a, const float* b, float t, float cut_dist,
     if (!smooth_interp(ia, ib, t, cut_dist, io)) return false;
     if (!smooth_affine_inverse(io, o)) return false;
     memcpy(out, o, 64);
+    return true;
+}
+
+bool smooth_view_step(const float* a, const float* b, float* dist, float* deg) {
+    float ia[16], ib[16];
+    if (!smooth_affine_inverse(a, ia) || !smooth_affine_inverse(b, ib)) return false;
+    float d[3] = { ib[12] - ia[12], ib[13] - ia[13], ib[14] - ia[14] };
+    *dist = sqrtf(dot3(d, d));
+    float A[9], B[9];
+    for (int r = 0; r < 3; r++) {
+        float la = sqrtf(dot3(ia + r * 4, ia + r * 4)), lb = sqrtf(dot3(ib + r * 4, ib + r * 4));
+        if (!(la > 1e-6f) || !(lb > 1e-6f)) return false;
+        for (int c = 0; c < 3; c++) { A[r * 3 + c] = ia[r * 4 + c] / la; B[r * 3 + c] = ib[r * 4 + c] / lb; }
+    }
+    if ((det3(ia) < 0.0f) != (det3(ib) < 0.0f)) { *deg = 180.0f; return true; }
+    if (det3(ia) < 0.0f) for (int c = 0; c < 3; c++) { A[6 + c] = -A[6 + c]; B[6 + c] = -B[6 + c]; }
+    float qa[4], qb[4];
+    mat_to_quat(A, qa);
+    mat_to_quat(B, qb);
+    float c = fabsf(qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3]);
+    *deg = 2.0f * acosf(c > 1.0f ? 1.0f : c) * 57.29578f;
     return true;
 }

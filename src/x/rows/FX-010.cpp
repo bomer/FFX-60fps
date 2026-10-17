@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 int      ppp_step_paused(int (__cdecl* tramp)(void*, uint32_t), void* prog, uint32_t flags);
 bool     ppp_resolve_pause(const char* row, const uint8_t* cmp_at);
@@ -119,6 +120,18 @@ static int prog_index(void* prog) {
 // FX-010-PROGS=a-b (test switch, bisect): pause only programs whose slot index is in [a, b]; default all.
 static int g_prog_lo = 0, g_prog_hi = 0x7FFFFFFF;
 static volatile LONG g_prog_seen[128];
+static bool g_keyhold = false;                   // FX-010-KEYHOLD (see keyhold_find)
+static volatile LONG g_kh_paused = 0;             // 1 during FX-010's paused steps while KEYHOLD is on
+static bool keyhold_find();
+static void* g_fd_prog = nullptr;                 // FX-010-FREEDEFER: program of the current paced logic step
+static bool  g_freedefer = false;
+static int   g_fd_n = 0;
+static void  fd_flush(void* prog, bool drop);
+static bool  freedefer_find();
+static bool  freedefer_patch();
+static bool keyhold_patch();
+static LONG g_prog_last[128];                    // logic-tick count (g_fx_n) of each slot's last step (Num / solo cycle)
+static LONG g_fx_n_now = 0;
 
 // DIAG-FX010-OPS: log a selected program's groups and ops (FUN_00717010 layout: prog +0x18 group count, +0x3C groups
 // stride 0x10 {+0 group def, +4 first particle, +0xC u16 particle count}; group def +0xC flags, +0x26 op count, +0x28
@@ -149,6 +162,7 @@ static void log_prog_ops(int idx, uint8_t* prog) {
 
 static bool prog_selected(void* prog) {
     int i = prog_index(prog);
+    if (i >= 0 && i < 128) g_prog_last[i] = g_fx_n_now;
     if (i >= 0 && i < 128 && !InterlockedExchange(&g_prog_seen[i], 1)) {
         log_line("FX-010: field program %d first stepped (%s)", i,
                  (i >= g_prog_lo && i <= g_prog_hi) ? "paused on render-only" : "NOT paused (FX-010-PROGS)");
@@ -337,7 +351,134 @@ static bool     g_diag_restart = false;
 static int      g_loopdefer_stale = 0;
 static volatile LONG g_raw_restarts = 0;
 
+// DIAG-FX010-PTRACE (diagnostic, default 0): particles of FX-010-PROGS programs that loop-restart are traced: their first
+// PT_REC bytes are saved after every invocation (8-entry ring, with the invocation kind); 4 invocations after a restart
+// the ring is logged, one line per dword that changed across the 8 rows (U 17/10/2026: Zanarkand Dome great hall
+// light, program 9, blinks once per loop at the loop end; LOOPDEFER on/off and skipping its ungated ops: no change).
+enum { PT_REC = 0x180, PT_PARTS = 4, PT_RING = 8 };
+static bool g_ptrace = false;
+struct PtPart { uint8_t* p; int prog; int count; int pending; int ev; uint8_t ring[PT_RING][PT_REC]; char kind[PT_RING]; };
+static PtPart g_pt[PT_PARTS];
+static int g_pt_events = 0;
+static void pt_on_restart(void* part, void* prog) {
+    int pi = prog ? prog_index(prog) : -1;
+    if (pi < g_prog_lo || pi > g_prog_hi || g_pt_events >= 6) return;
+    for (int i = 0; i < PT_PARTS; i++) {
+        PtPart& t = g_pt[i];
+        if (t.p == part || !t.p) {
+            if (!t.p) { t.p = (uint8_t*)part; t.prog = pi; t.count = 0; }
+            if (!t.pending && t.count >= PT_RING - 4) t.pending = 4;
+            return;
+        }
+    }
+}
+static void pt_post() {
+    for (int i = 0; i < PT_PARTS; i++) {
+        PtPart& t = g_pt[i];
+        if (!t.p) continue;
+        int slot = t.count % PT_RING;
+        __try { memcpy(t.ring[slot], t.p, PT_REC); } __except (EXCEPTION_EXECUTE_HANDLER) { t.p = nullptr; continue; }
+        t.kind[slot] = "LBKS"[pacing_kind() & 3];
+        t.count++;
+        if (!t.pending || --t.pending) continue;
+        if (g_pt_events >= 6) continue;
+        g_pt_events++;
+        char kinds[PT_RING + 1];
+        for (int r = 0; r < PT_RING; r++) kinds[r] = t.kind[(t.count + r) % PT_RING];
+        kinds[PT_RING] = 0;
+        log_line("DIAG-FX010-PTRACE: prog %d part %p loop restart (event %d); last %d invocations %s (restart in the 4th)",
+                 t.prog, t.p, g_pt_events, PT_RING, kinds);
+        for (int off = 0; off < PT_REC; off += 4) {
+            uint32_t v[PT_RING];
+            bool diff = false;
+            for (int r = 0; r < PT_RING; r++) {
+                memcpy(&v[r], t.ring[(t.count + r) % PT_RING] + off, 4);
+                if (r && v[r] != v[0]) diff = true;
+            }
+            if (!diff) continue;
+            char line[400]; int w = 0;
+            for (int r = 0; r < PT_RING; r++) {
+                float f; memcpy(&f, &v[r], 4);
+                bool fl = (v[r] & 0x7F800000) != 0 && (v[r] & 0x7F800000) != 0x7F800000 && fabsf(f) < 1e7f && fabsf(f) > 1e-6f;
+                w += fl ? _snprintf_s(line + w, sizeof(line) - w, _TRUNCATE, " %c%g", kinds[r], f)
+                        : _snprintf_s(line + w, sizeof(line) - w, _TRUNCATE, " %c%08X", kinds[r], v[r]);
+            }
+            log_line("  +0x%03X:%s", off, line);
+        }
+    }
+}
+
+// DIAG-FX010-DTRACE (diagnostic, default 0): what the particle sprite draw FUN_00740f60 (called by group draw ops
+// 0x740ED0 / 0x7409E0) gets, per particle of FX-010-PROGS programs: the record (first DT_REC bytes) and the key node
+// at the call, per invocation (8-entry ring). 4 invocations after a loop restart in a traced program, every particle
+// is logged: drawn or not per invocation, and each dword where a render-only draw differs from the logic draw before
+// it (U 17/10/2026: Zanarkand Dome hall light, program 9, still blinks with KEYHOLD).
+enum { DT_REC = 0x180, DT_PARTS = 24, DT_RING = 8 };
+static bool g_dtrace = false;
+static void (__cdecl* g_dt_tramp)(void*, void*, void*) = nullptr;
+struct DtPart { uint8_t* p; uint32_t node[DT_RING]; uint8_t rec[DT_RING][DT_REC]; uint32_t drawn; };
+static DtPart g_dt[DT_PARTS];
+static int g_dt_n = 0, g_dt_slot = 0, g_dt_pending = 0, g_dt_events = 0, g_dt_prog = -1;
+static char g_dt_kind[DT_RING];
+static void __cdecl h_dt_draw(void* part, void* node, void* opd) {
+    int pi = g_rs_prog ? prog_index(g_rs_prog) : -1;
+    if (pi >= g_prog_lo && pi <= g_prog_hi) {
+        DtPart* t = nullptr;
+        for (int i = 0; i < g_dt_n; i++) if (g_dt[i].p == part) { t = &g_dt[i]; break; }
+        if (!t && g_dt_n < DT_PARTS) { t = &g_dt[g_dt_n++]; memset(t, 0, sizeof(*t)); t->p = (uint8_t*)part; }
+        if (t) {
+            __try { memcpy(t->rec[g_dt_slot], part, DT_REC); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            t->node[g_dt_slot] = (uint32_t)(uintptr_t)node;
+            t->drawn |= 1u << g_dt_slot;
+            g_dt_prog = pi;
+        }
+    }
+    g_dt_tramp(part, node, opd);
+}
+static void dt_post() {
+    g_dt_kind[g_dt_slot] = "LBKS"[pacing_kind() & 3];
+    if (g_dt_pending && !--g_dt_pending && g_dt_events < 4) {
+        g_dt_events++;
+        char kinds[DT_RING + 1];
+        for (int r = 0; r < DT_RING; r++) kinds[r] = g_dt_kind[(g_dt_slot + 1 + r) % DT_RING];
+        kinds[DT_RING] = 0;
+        log_line("DIAG-FX010-DTRACE: prog %d loop restart (event %d), %d particles; invocations %s (restart in the 4th)",
+                 g_dt_prog, g_dt_events, g_dt_n, kinds);
+        for (int i = 0; i < g_dt_n; i++) {
+            DtPart& t = g_dt[i];
+            char dr[DT_RING + 1], nd[200]; int w = 0;
+            for (int r = 0; r < DT_RING; r++) {
+                int sl = (g_dt_slot + 1 + r) % DT_RING;
+                dr[r] = (t.drawn >> sl) & 1 ? kinds[r] : '-';
+                w += _snprintf_s(nd + w, sizeof(nd) - w, _TRUNCATE, " %X", (t.drawn >> sl) & 1 ? t.node[sl] & 0xFFFF : 0);
+            }
+            dr[DT_RING] = 0;
+            log_line("  part %p drawn %s node%s", t.p, dr, nd);
+            for (int r = 1; r < DT_RING; r++) {
+                int sl = (g_dt_slot + 1 + r) % DT_RING, pv = (g_dt_slot + r) % DT_RING;
+                if (kinds[r] != 'B' || !((t.drawn >> sl) & 1) || !((t.drawn >> pv) & 1)) continue;
+                char line[600]; int k = 0, n = 0;
+                for (int off = 0; off < DT_REC && n < 24; off += 4) {
+                    uint32_t a, b; memcpy(&a, t.rec[pv] + off, 4); memcpy(&b, t.rec[sl] + off, 4);
+                    if (a == b) continue;
+                    float fa, fb; memcpy(&fa, &a, 4); memcpy(&fb, &b, 4);
+                    k += _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " +%X:%g>%g", off, fa, fb);
+                    n++;
+                }
+                if (n) log_line("    row %d (B) vs L before:%s", r + 1, line);
+            }
+        }
+    }
+    g_dt_slot = (g_dt_slot + 1) % DT_RING;
+    for (int i = 0; i < g_dt_n; i++) g_dt[i].drawn &= ~(1u << g_dt_slot);
+}
+
 static void __cdecl h_restart(void* part) {
+    if (g_ptrace) pt_on_restart(part, g_rs_prog);
+    if (g_dtrace && !g_dt_pending && g_rs_prog) {
+        int pi = prog_index(g_rs_prog);
+        if (pi >= g_prog_lo && pi <= g_prog_hi) g_dt_pending = 4;
+    }
     if (g_defer_prog && g_deferred_n >= 256) {           // full: evict entries of programs not stepped for 10 s
         int w = 0;
         for (int i = 0; i < g_deferred_n; i++)
@@ -715,7 +856,9 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
         if (g_diag_writes) { wr_snapshot((uint8_t*)prog); g_ph_active = 1; }
         if (g_rollback) rb_save((uint8_t*)prog);
         if (g_extrap && !g_interp && g_psnap) ex_apply((uint8_t*)prog);
+        g_kh_paused = g_keyhold ? 1 : 0;
         int r = ppp_step_paused(g_tramp, prog, flags);
+        g_kh_paused = 0;
         if (g_ex_nw) ex_restore();
         g_ph_active = 0;
         if (g_diag_writes) wr_diff(2);
@@ -736,6 +879,12 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
     if (g_diag_submit) diag_step_begin(1);
     bool defer = g_loopdefer && row_FX010.on && !g_disabled && pacing_active() && pacing_kind() != INV_BUILD;
     if (g_restart_site && g_deferred_n) deferred_flush(prog, false);
+    if (g_fd_n) fd_flush(prog, false);
+    {
+        bool fd = g_freedefer && row_FX010.on && !g_disabled && pacing_active() && pacing_kind() != INV_BUILD;
+        if (fd) { int pi = prog_index(prog); if (pi < g_prog_lo || pi > g_prog_hi) fd = false; }
+        g_fd_prog = fd ? prog : nullptr;
+    }
     if (defer) {
         int pi = prog_index(prog);
         if (pi < g_prog_lo || pi > g_prog_hi) defer = false;
@@ -749,11 +898,15 @@ static int __cdecl h_fp_step(void* prog, uint32_t flags) {
     if (interp) *g_skip_render = 0;
     g_defer_prog = nullptr;
     g_rs_prog = nullptr;
+    g_fd_prog = nullptr;
+    if (r && g_fd_n) fd_flush(prog, true);
     if (r && g_deferred_n) deferred_flush(prog, true);       // program ended: the field loop frees it now
     if (!r && g_psnap && row_FX010.on && pacing_kind() != INV_BUILD) ex_snapshot((uint8_t*)prog);
     if (interp && !r) {                                      // draw once, paused, half a tick behind
         ip_apply((uint8_t*)prog);
+        g_kh_paused = g_keyhold ? 1 : 0;
         ppp_step_paused(g_tramp, prog, flags);
+        g_kh_paused = 0;
         if (g_ex_nw) ex_restore();
         InterlockedIncrement(&g_ip_redraws);
     }
@@ -947,6 +1100,8 @@ static bool install() {
     }
     g_drawcam = config_row("FX-010-DRAWOPS", 1) != 0;
     g_keyadd = config_row("FX-010-KEYADD", 1) != 0;
+    g_ptrace = config_row("DIAG-FX010-PTRACE", 0) != 0;
+    g_dtrace = config_row("DIAG-FX010-DTRACE", 0) != 0;
     g_diag_ops = config_row("DIAG-FX010-OPS", 0) != 0;
     g_diag_restart = config_row("DIAG-FX010-RESTART", 0) != 0;
     g_loopdefer_stale = config_row("FX-010-LOOPDEFER-STALE", 0);
@@ -1037,12 +1192,378 @@ static bool install() {
     }
     if (g_drawcam && !drawcam_find()) return false;
     if (g_keyadd && !keyadd_find()) g_keyadd = false;
+    g_keyhold = config_row("FX-010-KEYHOLD", 0) != 0;
+    g_freedefer = config_row("FX-010-FREEDEFER", 1) != 0;
+    if (g_freedefer && !freedefer_find()) g_freedefer = false;
+    if (g_keyhold && !keyhold_find()) g_keyhold = false;
     log_line("  FX-010: FUN_007122f0 gva=0x%08X, entry hooked on the game thread",
              rt_to_gva_exe(g_entry));
     return true;
 }
 
+// FX-010-KEYHOLD (test switch, default 0, 17/10/2026): the particle loop FUN_00717010 moves each op's keyframe handle to the next
+// key when the key's time equals the particle age (+0xC), before calling the op, with no pause check (3 sites:
+// 0x717123, 0x7172D6, 0x717376, `CMP ECX,[ESI+0xC]; JNZ`). A paused call (age held at the tick value) could take the
+// step that the next logic call takes, so the paused frame drew the next key one frame early: the Zanarkand Dome great
+// hall light (program 9) blinked at each loop start (U 17/10/2026; D DIAG-FX010-PTRACE: handle +0xF8 0x166DE474 on the
+// logic frame, 0x166DE488 on the paused one; LOOPDEFER and skipping the ungated ops did not help). Each CMP+JNZ is
+// re-pointed to a stub that takes the "no step" branch during FX-010's paused calls. It did not fix that blink (the
+// cause was the particle free, FX-010-FREEDEFER), so it stays off; kept as a test switch. The +0x740A32/+0x740F22 sites
+// are the group draw ops' own key steps.
+static volatile LONG g_kh_held = 0;
+enum { KH_SITES = 5 };
+static void* g_kh_cont[KH_SITES];                 // after the JNZ
+static void* g_kh_skip[KH_SITES];                 // the JNZ target
+static uint8_t* g_kh_site[KH_SITES];
+static void kh_count() { InterlockedIncrement(&g_kh_held); }
+__declspec(naked) static void h_kh0() {
+    __asm {
+        cmp dword ptr [g_kh_paused], 0
+        jne held
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        jmp dword ptr [g_kh_cont + 0]
+    held:
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        push eax
+        push ecx
+        push edx
+        call kh_count
+        pop edx
+        pop ecx
+        pop eax
+    skip:
+        jmp dword ptr [g_kh_skip + 0]
+    }
+}
+__declspec(naked) static void h_kh1() {
+    __asm {
+        cmp dword ptr [g_kh_paused], 0
+        jne held
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        jmp dword ptr [g_kh_cont + 4]
+    held:
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        push eax
+        push ecx
+        push edx
+        call kh_count
+        pop edx
+        pop ecx
+        pop eax
+    skip:
+        jmp dword ptr [g_kh_skip + 4]
+    }
+}
+__declspec(naked) static void h_kh2() {
+    __asm {
+        cmp dword ptr [g_kh_paused], 0
+        jne held
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        jmp dword ptr [g_kh_cont + 8]
+    held:
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        push eax
+        push ecx
+        push edx
+        call kh_count
+        pop edx
+        pop ecx
+        pop eax
+    skip:
+        jmp dword ptr [g_kh_skip + 8]
+    }
+}
+__declspec(naked) static void h_kh3() {
+    __asm {
+        cmp dword ptr [g_kh_paused], 0
+        jne held
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        jmp dword ptr [g_kh_cont + 12]
+    held:
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        push eax
+        push ecx
+        push edx
+        call kh_count
+        pop edx
+        pop ecx
+        pop eax
+    skip:
+        jmp dword ptr [g_kh_skip + 12]
+    }
+}
+__declspec(naked) static void h_kh4() {
+    __asm {
+        cmp dword ptr [g_kh_paused], 0
+        jne held
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        jmp dword ptr [g_kh_cont + 16]
+    held:
+        cmp ecx, dword ptr [esi + 0xC]
+        jne skip
+        push eax
+        push ecx
+        push edx
+        call kh_count
+        pop edx
+        pop ecx
+        pop eax
+    skip:
+        jmp dword ptr [g_kh_skip + 16]
+    }
+}
+
+// FX-010-FREEDEFER (default 1, 17/10/2026): the loop tail of FUN_00717010 frees particles whose lifetime is over
+// (0x7173D7 `CMP [ESI+0xC],EAX; JC alive`, then unlink and FUN_007168f0(part, 0)), while emitter ops of the same logic
+// step have already created their successors. The next paused frame drew only the successors, whose ops had not run
+// yet (invisible): the Zanarkand Dome great hall orbs (program 9: 16 sprites re-emitted every loop) vanished for one
+// frame each loop (U 17/10/2026 screenshots; D DIAG-FX010-DTRACE: old sprites drawn LBLBLBL-, new -------B). Stock
+// never draws between that tail and the next step. During a paced logic step of a paused program the free is queued
+// (the particle stays linked and is drawn unchanged on the paused frame) and done at the start of the program's next
+// logic step, before its ops: the state the next step sees is the stock one.
+static uint8_t* g_fd_site = nullptr;
+static void* g_fd_alive = nullptr;                // JC target (particle lives on)
+static void* g_fd_die = nullptr;                  // fall-through (unlink + free)
+static uint32_t (__cdecl* g_fd_dec)(uint32_t) = nullptr;   // FUN_00a44650: handle -> pointer
+static uint32_t (__cdecl* g_fd_enc)(uint32_t) = nullptr;   // FUN_00a44700: pointer -> handle
+static void (__cdecl* g_fd_free)(void*, int) = nullptr;     // FUN_007168f0(part, 0)
+struct FdEntry { void* prog; void* part; };
+static FdEntry g_fd[256];
+static volatile LONG g_fd_queued = 0, g_fd_done = 0, g_fd_dropped = 0;
+static void __cdecl fd_queue(void* part) {
+    if (g_fd_n < 256) { g_fd[g_fd_n++] = { g_fd_prog, part }; InterlockedIncrement(&g_fd_queued); }
+}
+__declspec(naked) static void h_fd() {
+    __asm {
+        cmp dword ptr [esi + 0xC], eax
+        jc alive
+        cmp dword ptr [g_fd_prog], 0
+        je die
+        cmp dword ptr [g_fd_n], 256
+        jge die
+        push eax
+        push ecx
+        push edx
+        push esi
+        call fd_queue
+        add esp, 4
+        pop edx
+        pop ecx
+        pop eax
+    alive:
+        jmp dword ptr [g_fd_alive]
+    die:
+        jmp dword ptr [g_fd_die]
+    }
+}
+// Free the queued particles of `prog` (start of its next logic step), or drop them (program ended: it freed them).
+static void fd_flush(void* prog, bool drop) {
+    int w = 0;
+    for (int i = 0; i < g_fd_n; i++) {
+        FdEntry e = g_fd[i];
+        if (e.prog != prog) { g_fd[w++] = e; continue; }
+        bool done = false;
+        if (!drop) {
+            uint32_t* link = (uint32_t*)((uint8_t*)prog + 0x30);
+            uint32_t cur = g_fd_dec(*link);
+            for (int guard = 0; cur && guard < 4096; guard++) {
+                if ((void*)(uintptr_t)cur == e.part) {
+                    *link = g_fd_enc(g_fd_dec(*(uint32_t*)(uintptr_t)cur));
+                    g_fd_free(e.part, 0);
+                    done = true;
+                    break;
+                }
+                link = (uint32_t*)(uintptr_t)cur;
+                cur = g_fd_dec(*link);
+            }
+        }
+        InterlockedIncrement(done ? &g_fd_done : &g_fd_dropped);
+    }
+    g_fd_n = w;
+}
+static bool freedefer_find() {
+    // FUN_00717010 tail: MOV EAX,[EBX+0x14]; MOV EBX,[EBP-0xC]; OR EBX,EAX; MOV [EBP-0xC],EBX; CMP [ESI+0xC],EAX;
+    // JC alive; PUSH EDI; CALL enc; MOV ECX,[EBP-0x20]; PUSH 0; PUSH ESI; MOV [ECX],EAX; CALL free; ADD ESP,0xC; JMP
+    uint8_t* m = sig_find_unique("FX-010-FREEDEFER particle free (FUN_00717010 tail)",
+        "8B 43 14 8B 5D F4 0B D8 89 5D F4 39 46 0C 0F 82 ?? ?? ?? ?? 57 E8 ?? ?? ?? ?? 8B 4D E0 6A 00 56 89 01 E8 ?? ?? ?? ?? 83 C4 0C E9",
+        0x7173CC);
+    if (!m) return false;
+    g_fd_site = m + 0xB;
+    g_fd_alive = g_fd_site + 9 + *(int32_t*)(g_fd_site + 5);
+    g_fd_die = g_fd_site + 9;
+    g_fd_enc = (uint32_t (__cdecl*)(uint32_t))call_target(m + 0x15);
+    g_fd_free = (void (__cdecl*)(void*, int))call_target(m + 0x22);
+    uint8_t* dec = call_target(m - 0x29);               // 0x7173A3 CALL FUN_00a44650 (next particle)
+    if (!g_fd_enc || !g_fd_free || !dec || !sig_match(m - 0x2B, "FF 36 E8")) {
+        log_line("  FX-010-FREEDEFER: helpers not found - off");
+        return false;
+    }
+    g_fd_dec = (uint32_t (__cdecl*)(uint32_t))dec;
+    log_line("  FX-010-FREEDEFER: free check gva 0x%08X (expected 0x007173D7), alive 0x%08X, free gva 0x%08X (0x007168F0), "
+             "enc 0x%08X (0x00A44700), dec 0x%08X (0x00A44650)", rt_to_gva_exe(g_fd_site), rt_to_gva_exe(g_fd_alive),
+             rt_to_gva_exe((void*)g_fd_free), rt_to_gva_exe((void*)g_fd_enc), rt_to_gva_exe((void*)g_fd_dec));
+    return true;
+}
+static bool freedefer_patch() {
+    uint8_t j[9] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90 };
+    int32_t rel = (int32_t)((uint8_t*)&h_fd - (g_fd_site + 5));
+    memcpy(j + 1, &rel, 4);
+    if (!patch_write(g_fd_site, j, 9)) { log_line("FX-010-FREEDEFER: patch failed - off"); return false; }
+    log_line("FX-010-FREEDEFER: particle frees of paced logic steps deferred to the program's next logic step");
+    return true;
+}
+
+static uint8_t* g_kh_draw[4];
+static int g_kh_draw_n = 0;
+static bool kh_draw_accept(const uint8_t* m) { if (g_kh_draw_n < 4) g_kh_draw[g_kh_draw_n++] = (uint8_t*)m; return true; }
+
+static bool keyhold_find() {
+    // FUN_00717010 key steps: CMP ECX,[ESI+0xC]; JNZ rel8; PUSH reg; MOV ..; CALL FUN_00a44700 (handle of the next key)
+    uint8_t* a = sig_find_unique("FX-010-KEYHOLD key step 1 (FUN_00717010)",
+        "8B 0C 02 03 D0 83 C4 04 89 45 F0 3B 4E 0C 75 0F 52 89 55 F0 E8", 0x717118);
+    uint8_t* b = sig_find_unique("FX-010-KEYHOLD key step 2 (FUN_00717010)",
+        "8B 0C 18 03 C3 83 C4 04 3B 4E 0C 75 10 50 8B D8 E8", 0x7172CE);
+    uint8_t* c = sig_find_unique("FX-010-KEYHOLD key step 3 (FUN_00717010)",
+        "03 D3 83 C4 04 8B 0A 3B 4E 0C 75 10 52 8B DA E8", 0x71736F);
+    if (!a || !b || !c) return false;
+    g_kh_site[0] = a + 0xB; g_kh_site[1] = b + 8; g_kh_site[2] = c + 7;
+    for (int i = 1; i < 3; i++)
+        if (g_kh_site[i] < g_kh_site[0] || g_kh_site[i] > g_kh_site[0] + 0x300) {
+            log_line("  FX-010-KEYHOLD: sites not in one function - off");
+            return false;
+        }
+    // Group draw ops with their own key step (0x7409E0 at 0x740A32, 0x740ED0 at 0x740F22; the +0xF8 handle of program
+    // 9 group 0 is 0x740ED0's): CALL handle->ptr; MOV EBX,EAX; ...; CMP ECX,[ESI+0xC]; JNZ; ...; CALL FUN_00a44700
+    g_kh_draw_n = 0;
+    int hits = 0;
+    sig_scan_module(exe_base(), exe_size(),
+        "E8 ?? ?? ?? ?? 8B D8 8B 45 10 83 C4 04 0F B7 50 04 8B 0C 1A 03 D3 3B 4E 0C 75 11 52 8B DA E8 ?? ?? ?? ?? 89 04 37",
+        &hits, kh_draw_accept);
+    if (g_kh_draw_n != 2 || call_target(g_kh_draw[0] + 0x1E) != call_target(a + 0x14)) {
+        log_line("  FX-010-KEYHOLD: draw-op key steps: %d found (expected 2 near 0x00740A1C/0x00740F0C) - off", g_kh_draw_n);
+        return false;
+    }
+    g_kh_site[3] = g_kh_draw[0] + 0x16; g_kh_site[4] = g_kh_draw[1] + 0x16;
+    log_line("  FX-010-KEYHOLD: draw-op key steps gva 0x%08X / 0x%08X (expected 0x00740A32 / 0x00740F22)",
+             rt_to_gva_exe(g_kh_site[3]), rt_to_gva_exe(g_kh_site[4]));
+    for (int i = 0; i < KH_SITES; i++) {
+        uint8_t* s = g_kh_site[i];
+        g_kh_cont[i] = s + 5;
+        g_kh_skip[i] = s + 5 + (int8_t)s[4];
+    }
+    return true;
+}
+
+static bool keyhold_patch() {
+    void* stubs[KH_SITES] = { (void*)&h_kh0, (void*)&h_kh1, (void*)&h_kh2, (void*)&h_kh3, (void*)&h_kh4 };
+    for (int i = 0; i < KH_SITES; i++) {
+        uint8_t j[5] = { 0xE9 };
+        int32_t rel = (int32_t)((uint8_t*)stubs[i] - (g_kh_site[i] + 5));
+        memcpy(j + 1, &rel, 4);
+        if (!patch_write(g_kh_site[i], j, 5)) { log_line("FX-010-KEYHOLD: patch %d failed", i); return false; }
+    }
+    log_line("FX-010-KEYHOLD: key steps gva 0x%08X/0x%08X/0x%08X/0x%08X/0x%08X -> stubs (no key step on paused calls)",
+             rt_to_gva_exe(g_kh_site[0]), rt_to_gva_exe(g_kh_site[1]), rt_to_gva_exe(g_kh_site[2]),
+             rt_to_gva_exe(g_kh_site[3]), rt_to_gva_exe(g_kh_site[4]));
+    return true;
+}
+
+// FX-010-PAUSESKIP=<hex VA>,... (test switch, dev hotkey Num *): ops listed here return at once on paused calls (pause
+// flag set) while selected. Num * cycles: none -> each op alone -> all -> none. For ungated ops (no pause check) that
+// may write particle state on paused frames (U 17/10/2026: Zanarkand Dome great hall, program 9 blinks when paused;
+// F7 no effect). Not compatible with DIAG-FX010-WRITES-OPS on the same VA (one hook per target).
+enum { PSKIP_MAX = 8 };
+static int      g_ps_n = 0, g_ps_state = -1;
+static uint32_t g_ps_va[PSKIP_MAX], g_ps_mask = 0;
+static void*    g_ps_tramp[PSKIP_MAX];
+static volatile LONG g_ps_hits[PSKIP_MAX];
+__declspec(naked) static void ps_ret() { __asm ret }
+static void* __cdecl ps_target(int i) {
+    if (*g_ppp_pause != 0 && (g_ps_mask & (1u << i))) { InterlockedIncrement(&g_ps_hits[i]); return (void*)&ps_ret; }
+    return g_ps_tramp[i];
+}
+#define PSKIP_THUNK(I) __declspec(naked) static void h_pskip##I() { __asm push I __asm call ps_target __asm add esp, 4 __asm jmp eax }
+PSKIP_THUNK(0)
+PSKIP_THUNK(1)
+PSKIP_THUNK(2)
+PSKIP_THUNK(3)
+PSKIP_THUNK(4)
+PSKIP_THUNK(5)
+PSKIP_THUNK(6)
+PSKIP_THUNK(7)
+static void* const k_ps_thunk[PSKIP_MAX] = {(void*)&h_pskip0, (void*)&h_pskip1, (void*)&h_pskip2, (void*)&h_pskip3,
+                                            (void*)&h_pskip4, (void*)&h_pskip5, (void*)&h_pskip6, (void*)&h_pskip7};
+
+static void pskip_install() {
+    char lst[200];
+    config_str("rows", "FX-010-PAUSESKIP", lst, sizeof(lst), "");
+    for (char* q = lst; *q && g_ps_n < PSKIP_MAX;) {
+        char* e = nullptr;
+        unsigned long v = strtoul(q, &e, 16);
+        if (e == q) { q++; continue; }
+        q = e;
+        uint8_t* f = exe_base() + (v - 0x400000);
+        if (!hook_entry("FX-010-PAUSESKIP op", f, k_ps_thunk[g_ps_n], &g_ps_tramp[g_ps_n])) continue;
+        g_ps_va[g_ps_n++] = (uint32_t)v;
+        log_line("  FX-010-PAUSESKIP: op 0x%08lX hooked (skipped on paused calls when selected by Num *)", v);
+    }
+}
+
 #ifdef FPS60_DEV
+static void pskip_hotkey() {
+    static bool prev = false;
+    if (!dev_key(VK_MULTIPLY, &prev) || !g_ps_n) return;
+    g_ps_state = (g_ps_state + 1 > g_ps_n) ? -1 : g_ps_state + 1;
+    g_ps_mask = g_ps_state < 0 ? 0 : g_ps_state == g_ps_n ? (1u << g_ps_n) - 1 : 1u << g_ps_state;
+    char hits[160]; int w = 0; hits[0] = 0;
+    for (int i = 0; i < g_ps_n; i++)
+        w += _snprintf_s(hits + w, sizeof(hits) - w, _TRUNCATE, " %X:%ld", g_ps_va[i], InterlockedExchange(&g_ps_hits[i], 0));
+    if (g_ps_state < 0) log_line("Num*: FX-010-PAUSESKIP none (skips so far:%s)", hits);
+    else if (g_ps_state == g_ps_n) log_line("Num*: FX-010-PAUSESKIP all %d ops (skips so far:%s)", g_ps_n, hits);
+    else log_line("Num*: FX-010-PAUSESKIP only op 0x%08X (skips so far:%s)", g_ps_va[g_ps_state], hits);
+}
+
+// Dev hotkey Num -: FX-010-FREEDEFER off/on at runtime (the patch stays; frees queued before still run).
+static void loopdefer_hotkey() {
+    static bool prev = false;
+    static int installed = -1;
+    if (!dev_key(VK_SUBTRACT, &prev)) return;
+    if (installed < 0) installed = g_freedefer ? 1 : 0;
+    if (!installed) { log_line("Num-: FX-010-FREEDEFER not installed"); return; }
+    g_freedefer = !g_freedefer;
+    log_line("Num-: FX-010-FREEDEFER=%d (queued %ld, freed %ld, dropped %ld; key steps held %ld)", g_freedefer, g_fd_queued,
+             g_fd_done, g_fd_dropped, g_kh_held);
+}
+
+// Dev hotkey Num / (U 17/10/2026, Zanarkand Dome great hall light blinking, gone with Num 4 FX-010 off): bisect live.
+// Each press pauses only the next program stepped in the last 120 logic ticks (the others step every frame: 2x but
+// steady), after the last one all programs again. The press that brings the blinking back names the program.
+static void solo_hotkey() {
+    static bool prev = false;
+    static int k = -1;
+    if (!dev_key(VK_DIVIDE, &prev)) return;
+    int act[128], n = 0;
+    char lst[512]; int w = 0; lst[0] = 0;
+    for (int i = 0; i < 128; i++)
+        if (g_prog_seen[i] && g_fx_n_now - g_prog_last[i] < 120) {
+            act[n++] = i;
+            w += _snprintf_s(lst + w, sizeof(lst) - w, _TRUNCATE, " %d", i);
+        }
+    k = (k + 1 >= n) ? -1 : k + 1;
+    if (k < 0) { g_prog_lo = 0; g_prog_hi = 0x7FFFFFFF; log_line("Num/: FX-010 pauses all programs again (active:%s)", lst); return; }
+    g_prog_lo = g_prog_hi = act[k];
+    log_line("Num/: FX-010 pauses only program %d (%d of %d; active:%s)", act[k], k + 1, n, lst);
+}
+
 static void ex_hotkey() {                        // dev hotkey Num 7
     static bool prev = false;
     if (!dev_key(VK_NUMPAD7, &prev) || !g_psnap) return;
@@ -1058,8 +1579,12 @@ static void ex_hotkey() {                        // dev hotkey Num 7
 
 static void pre() {
     if (pacing_kind() != INV_BUILD) g_fx_n++;
+    g_fx_n_now = g_fx_n;
 #ifdef FPS60_DEV
     ex_hotkey();
+    solo_hotkey();
+    pskip_hotkey();
+    loopdefer_hotkey();
 #endif
     static LONG ex_dump_at = 0;
     if (g_ex_diag && (g_extrap || g_interp) && g_fx_n - ex_dump_at >= 600 && g_nexc) {
@@ -1138,6 +1663,18 @@ static void pre() {
         }
     }
     ungate_patch();
+    pskip_install();
+    if (g_keyhold && !keyhold_patch()) g_keyhold = false;
+    if (g_freedefer && !freedefer_patch()) g_freedefer = false;
+    if (g_dtrace) {
+        // FUN_00740f60 (sprite draw, aligned-stack prologue): PUSH EBX; MOV EBX,ESP; SUB ESP,8; AND ESP,-16
+        uint8_t* f = exe_base() + (0x740F60 - 0x400000);
+        if (!sig_match(f, "53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04") ||
+            !hook_entry("DIAG-FX010-DTRACE draw", f, (void*)&h_dt_draw, (void**)&g_dt_tramp)) {
+            log_line("DIAG-FX010-DTRACE: draw 0x00740F60 not hooked - off");
+            g_dtrace = false;
+        } else log_line("DIAG-FX010-DTRACE: draw 0x00740F60 hooked");
+    }
     if (g_loopdefer && !patch_call_rel32(g_restart_site, (void*)g_restart, (void*)&h_restart)) {
         log_line("FX-010-LOOPDEFER: patch failed - off");
         g_loopdefer = false;
@@ -1168,6 +1705,8 @@ static void post() {
         loop_reported = 1;
         log_line("FX-010-LOOPDEFER: first deferred restart applied (deferred %ld)", g_deferred_total);
     }
+    if (g_ptrace) pt_post();
+    if (g_dtrace) dt_post();
     if (g_diag_submit && tick % 600 == 0) diag_dump();
     if (g_diag_writes && tick % 600 == 0 && (g_wr_steps[1] || g_wr_steps[2])) { wr_dump(); ph_dump(); }
 }

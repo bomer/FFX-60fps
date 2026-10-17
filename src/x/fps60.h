@@ -37,6 +37,11 @@ void config_load();
 int  config_row(const char* row_id, int def);   // [rows] ROW_ID=0|1
 void config_str(const char* sect, const char* key, char* buf, int n, const char* def);
 bool config_write(const char* sect, const char* key, const char* value);   // game-folder fps60.ini
+// text.cpp: the mod's text in the game's current text language (text/strings.json -> text_strings.h).
+#include "text_strings.h"
+bool ffx_text_init();                            // resolves the language getter once (install time)
+int  ffx_text_lang();                            // current text language (1 = English if unknown)
+const uint8_t* ffx_text(int id);                 // T_* id -> game-encoded text for the current language
 
 
 // ---------------------------------------------------------------- sigs.cpp (ported from FRAMEDIFF)
@@ -144,6 +149,7 @@ struct Row {
 };
 extern Row row_MAG008;                           // rows/MAG-008.cpp
 extern Row row_MAG006;                           // rows/MAG-006.cpp
+extern Row row_CLK013;                           // rows/CLK-013.cpp (stock pacing in SyncData cutscenes)
 extern Row row_W2A002;                           // rows/W2A-002.cpp
 extern Row row_CLK002;                           // rows/CLK-002.cpp
 extern Row row_MAG009;                           // rows/MAG-009.cpp
@@ -169,6 +175,8 @@ extern Row row_UI017;                           // rows/UI-017.cpp (pad latch pe
 extern Row row_UISPH001;                        // rows/UI-SPH-001.cpp (Sphere Grid update per logic tick)
 extern Row row_DEVSTOCK;                        // rows/DEV-STOCK.cpp (test tool: Ctrl+F5 toggles stock pacing)
 extern Row row_DEVTURBO;                        // rows/DEV-TURBO.cpp (test tool: hold a key to fast-forward)
+extern Row row_DEVDMG;                           // rows/DEV-DMG.cpp (test tool: fixed party hit damage)
+extern Row row_QOLSAVEICON;                     // rows/QOL-SAVEICON.cpp (option: no autosave chocobo)
 extern Row row_UIBTLL1;                         // rows/UI-BTLL1.cpp (battle L1 party swap presses kept)
 extern Row row_UI014;                           // rows/UI-014.cpp (minimap arrow pulse per logic tick)
 extern Row row_PERF001;                         // rows/PERF-001.cpp (1 ms timer, no power throttling)

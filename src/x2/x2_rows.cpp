@@ -9,7 +9,7 @@
 namespace x2 {
 
 // ---------------------------------------------------------------- registry
-extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_TASK001, row_SR003, row_DIAGPRESENT, row_DIAGPPPOPS, row_DEVBISECT;
+extern Row row_MAG008, row_MAG009, row_LOOP005, row_LOOP004, row_UI001, row_UI017, row_W2A002, row_CLK002, row_MAG006, row_FX010DRAWOPS, row_FX012, row_UI014, row_TEXANIM001, row_DIAGRATE, row_MENU001, row_MENU002, row_TITLE001, row_DIAGDRAWSTEP, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_MAG016, row_MAG030, row_MAG020, row_MAG026, row_MAG025, row_MAG019, row_MAG027, row_MAGSTOCK, row_MAG031, row_CHR001, row_CHR002, row_TASK001, row_SR003, row_DIAGPRESENT, row_VSYNC, row_DIAGPPPOPS, row_DIAGFTBLINK, row_DIAGFLASH, row_DIAGPSET, row_DIAGHIT, row_DIAGCRASH, row_CFGMENU, row_DEVTURBO, row_DEVBISECT;
 
 static Row* g_rows[] = {
     &row_MAG008,                                 // rows/X2-MAG-008.cpp
@@ -22,6 +22,7 @@ static Row* g_rows[] = {
     &row_CLK002,                                 // rows/X2-CLK-002.cpp
     &row_MAG006,                                 // rows/X2-MAG-006.cpp
     &row_FX010DRAWOPS,                           // rows/X2-FX-010-DRAWOPS.cpp
+    &row_FX012,                                  // rows/X2-FX-012.cpp (pppop_flash on paused steps)
     &row_UI014,                                  // rows/X2-UI-014.cpp
     &row_TEXANIM001,                             // rows/X2-TEXANIM-001.cpp
     &row_MAG016,                                 // rows/X2-MAG-016.cpp (record driver, 79 magic DLLs)
@@ -29,6 +30,12 @@ static Row* g_rows[] = {
     &row_MAG020,                                 // rows/X2-MAG-020.cpp (family-X node walk)
     &row_MAG026,                                 // rows/X2-MAG-026.cpp (family-X records; after MAG-006, MAG-020)
     &row_MAG025,                                 // rows/X2-MAG-025.cpp (OPU effect-unit walker)
+    &row_MAG019,                                 // rows/X2-MAG-019.cpp (VFX shader lookup guard)
+    &row_MAG027,                                 // rows/X2-MAG-027.cpp (cross-fade timeline boundary events)
+    &row_MAGSTOCK,                               // rows/X2-MAG-STOCK.cpp (stock pacing while listed DLLs load)
+    &row_MAG031,                                 // rows/X2-MAG-031.cpp (pause flag left by an unloaded DLL)
+    &row_CHR001,                                 // rows/X2-CHR-001.cpp (re-list loop-3 chr models on render-only)
+    &row_CHR002,                                 // rows/X2-CHR-002.cpp (battle idle held on its last frame loops)
     &row_TASK001,                                // rows/X2-TASK-001.cpp (actor render tasks replayed)
     &row_SR003,                                  // rows/X2-SR-003.cpp (soft reset, field + battle)
     &row_MENU002,                                // rows/X2-MENU-002.cpp (field main menu at 60 Hz)
@@ -40,7 +47,15 @@ static Row* g_rows[] = {
     &row_DIAGRATE,                               // rows/X2-DIAG-RATE.cpp (diagnostic, default 0)
     &row_DIAGDRAWSTEP,                           // rows/X2-DIAG-DRAWSTEP.cpp (diagnostic, default 0)
     &row_DIAGPRESENT,                            // rows/X2-DIAG-PRESENT.cpp (diagnostic, default 0)
+    &row_VSYNC,                                  // rows/X2-DIAG-PRESENT.cpp (V-Sync, default 0; shares the Present hook)
     &row_DIAGPPPOPS,                             // rows/X2-DIAG-PPPOPS.cpp (diagnostic, default 0)
+    &row_DIAGFTBLINK,                            // rows/X2-DIAG-FTBLINK.cpp (diagnostic, default 0)
+    &row_DIAGFLASH,                              // rows/X2-DIAG-FLASH.cpp (diagnostic, default 0)
+    &row_DIAGPSET,                               // rows/X2-DIAG-PSET.cpp (diagnostic, default 0)
+    &row_DIAGHIT,                                // rows/X2-DIAG-HIT.cpp (diagnostic, default 0)
+    &row_DIAGCRASH,                              // rows/X2-DIAG-CRASH.cpp (diagnostic, default 0)
+    &row_CFGMENU,                                // rows/X2-CFG-MENU.cpp (mod options on the Config page)
+    &row_DEVTURBO,                               // rows/X2-DEV-TURBO.cpp (test tool, hold numpad 0)
     &row_DEVBISECT,                              // rows/X2-DEV-BISECT.cpp (test tool, F8; must stay last)
     nullptr
 };
@@ -59,6 +74,7 @@ void rows_install_all() {
         __try { ok = r.install ? r.install() : true; }
         __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
         r.on = ok ? 1 : 0;
+        r.installed = r.on;
         if (ok) on++;
         log_line("row %-12s %s - %s", r.id, ok ? "ON" : "FAILED to install, stays off", r.summary);
     }
@@ -68,6 +84,18 @@ void rows_install_all() {
 bool row_on(const char* id) {
     for (Row** p = g_rows; *p; p++) if (strcmp((*p)->id, id) == 0) return (*p)->on != 0;
     return true;                                 // not a registered row: never gated
+}
+
+// Rows are not installed at runtime (their installs patch game code, possibly code running at that moment): a row
+// that was off at startup stays off until the next start.
+bool row_set(Row& r, bool on) {
+    if (on && !r.installed) {
+        log_line("row %-12s not installed at startup - takes effect at the next start", r.id);
+        return false;
+    }
+    if ((r.on != 0) != on) log_line("row %-12s %s at runtime", r.id, on ? "ON" : "OFF");
+    r.on = on ? 1 : 0;
+    return true;
 }
 
 void rows_pre() {

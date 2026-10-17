@@ -31,6 +31,19 @@ static ActHist* g_h = nullptr;             // MAXA entries
 static uint8_t* g_hist_base = nullptr;     // actor array the history belongs to
 static int   g_kind = INV_STOCK;
 static bool  g_applied_inv = false;
+static int   g_bis = 0;                     // dev: Ctrl+Num 2 stub bisect
+// SMOOTH-002-SCRUB (default 1, 17/10/2026): Ch_DrawMain reads at least one stack word it never set (S: the specular
+// camera vector's w at [EBP-0x3C8], 0x82FBE1, used at 0x82FC0F/0x82FC59 before its write at 0x82FC9C; there may be
+// more). This stub runs Ch_DrawMain one frame deeper than stock, and on logic frames the interpolation leaves its own
+// values there, so render-only and logic frames read different leftovers: the save sphere ring changed brightness every
+// frame (U 17/10/2026: only with SMOOTH-002 and SMOOTH-003 live, only with the logic-frame apply (Ctrl+Num 2 bisect),
+// although no root was written; Ctrl+Num 3 zeroing 16 KB of stack before the call fixed it). The stub zeroes 16 KB
+// below its frame before every Ch_DrawMain call, so every frame reads the same leftovers. Ctrl+Num 3 toggles it (dev).
+static int   g_scrub = 1;
+__declspec(noinline) static void scrub_stack() {
+    volatile uint8_t buf[0x4000];
+    for (int i = 0; i < (int)sizeof(buf); i += 4) *(volatile uint32_t*)&buf[i] = 0;
+}
 static bool  g_recorded_inv = false;       // history rotated in this invocation (at the draw)
 static int   g_childrel = 0;
 static int   g_warp = 1, g_warp_lines = 0;
@@ -174,10 +187,14 @@ static void trace_draw(bool applied) {
         if (applied) for (int w = 0; w < g_w_n; w++) if (g_w_idx[w] == i) { moved = true; break; }
         const ActHist& h = g_h[i];
         InterlockedIncrement(&g_trace_n);
-        log_line("SMOOTH-002-TRACE: %s slot %d id 0x%04X drawn (%.2f, %.2f, %.2f) %s | tick k (%.2f, %.2f, %.2f) step %.2f",
+        log_line("SMOOTH-002-TRACE: %s slot %d id 0x%04X drawn (%.2f, %.2f, %.2f) %s | tick k (%.2f, %.2f, %.2f) step %.2f | "
+                 "r0 %08X %08X %08X r1 %08X %08X %08X r2 %08X %08X %08X flags %08X",
                  g_kind == INV_LOGIC ? "LOGIC " : g_kind == INV_BUILD ? "RENDER" : g_kind == INV_BACKLOG ? "BACKLG" : "STOCK ",
                  i, g_trace_id, r[12], r[13], r[14], moved ? "interp" : "as-is ",
-                 h.n ? h.m[1][12] : 0.0f, h.n ? h.m[1][13] : 0.0f, h.n ? h.m[1][14] : 0.0f, h.step[1]);
+                 h.n ? h.m[1][12] : 0.0f, h.n ? h.m[1][13] : 0.0f, h.n ? h.m[1][14] : 0.0f, h.step[1],
+                 ((const uint32_t*)r)[0], ((const uint32_t*)r)[1], ((const uint32_t*)r)[2], ((const uint32_t*)r)[4],
+                 ((const uint32_t*)r)[5], ((const uint32_t*)r)[6], ((const uint32_t*)r)[8], ((const uint32_t*)r)[9],
+                 ((const uint32_t*)r)[10], *(const uint32_t*)(a + FLAGS));
     }
 }
 #endif
@@ -254,18 +271,75 @@ static void apply_render(float t) {
     apply_children(base, n);
 }
 
+// SMOOTH-002-DIAG: every 600 logic windows, one line per active actor (slot, id, flags, parent, position, translation
+// and rotation step of the last tick; used to find the save sphere actor, 17/10/2026).
+static void diag_actors() {
+    uint8_t* base;
+    int n;
+    if (!begin(&base, &n)) return;
+    for (int i = 0; i < n; i++) {
+        uint8_t* a = base + i * STRIDE;
+        if (a[2] == 0) continue;
+        ActHist& h = g_h[i];
+        float deg = -1.0f, d = -1.0f;
+        if (h.n >= 2) {
+            d = tdist(h.m[0], h.m[1]);
+            float tr = 0.0f;                                         // angle from the trace of R0^T R1 (row-normalised)
+            float la[3], lb[3];
+            for (int r = 0; r < 3; r++) {
+                la[r] = sqrtf(h.m[0][r*4]*h.m[0][r*4] + h.m[0][r*4+1]*h.m[0][r*4+1] + h.m[0][r*4+2]*h.m[0][r*4+2]);
+                lb[r] = sqrtf(h.m[1][r*4]*h.m[1][r*4] + h.m[1][r*4+1]*h.m[1][r*4+1] + h.m[1][r*4+2]*h.m[1][r*4+2]);
+            }
+            for (int r = 0; r < 3; r++)
+                if (la[r] > 1e-6f && lb[r] > 1e-6f)
+                    tr += (h.m[0][r*4]*h.m[1][r*4] + h.m[0][r*4+1]*h.m[1][r*4+1] + h.m[0][r*4+2]*h.m[1][r*4+2]) / (la[r] * lb[r]);
+            float c = (tr - 1.0f) * 0.5f;
+            if (c > 1.0f) c = 1.0f;
+            if (c < -1.0f) c = -1.0f;
+            deg = acosf(c) * 57.29578f;
+        }
+        const float* r = (const float*)(a + ROOT);
+        log_line("SMOOTH-002-DIAG: slot %d id 0x%04X flags %08X parent %08X pos (%.1f, %.1f, %.1f) step %.2f units %.2f deg scale %.3f",
+                 i, *(uint16_t*)a, *(uint32_t*)(a + FLAGS), *(uint32_t*)(a + PARENT), r[12], r[13], r[14], d, deg,
+                 sqrtf(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]));
+    }
+}
+
 static void __cdecl h_draw() {
     bool applied = false;
     float t = pacing_t();
-    if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) &&
+    static LONG dumped = -1;
+    if (g_diag && (g_kind == INV_LOGIC) && g_lwindows % 600 == 300 && dumped != g_lwindows) {
+        dumped = g_lwindows;
+        __try { diag_actors(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+#ifdef FPS60_DEV
+    // Dev hotkey Ctrl+Num 2 (U 17/10/2026: save sphere ring flickers only with SMOOTH-002 and SMOOTH-003 both live,
+    // while SMOOTH-002 writes no root): bisect this stub. 0 normal, 1 no logic-frame apply, 2 no render-only hold,
+    // 3 neither (pass-through).
+    static bool prevr = false;
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && dev_key(VK_NUMPAD2, &prevr)) {
+        g_bis = (g_bis + 1) % 4;
+        log_line("Ctrl+Num2: SMOOTH-002 stub bisect %d (%s)", g_bis,
+                 g_bis == 0 ? "normal" : g_bis == 1 ? "no logic apply" : g_bis == 2 ? "no render hold" : "pass-through");
+    }
+    static bool prevs = false;
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && dev_key(VK_NUMPAD3, &prevs)) {
+        g_scrub = !g_scrub;
+        log_line("Ctrl+Num3: SMOOTH-002 stack scrub before Ch_DrawMain %s", g_scrub ? "ON" : "OFF");
+    }
+#endif
+    if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) && !(g_bis & 1) &&
         (g_kind == INV_LOGIC || g_kind == INV_BACKLOG)) {
         g_applied_inv = true;
         g_lwindows++;
         applied = true;
         __try { apply_interp(t); }
         __except (EXCEPTION_EXECUTE_HANDLER) { on_fault("SMOOTH-002 apply", GetExceptionCode()); }
-    } else if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) && g_kind == INV_BUILD &&
-               (g_renderhold || t < 1.0f)) {
+    // Before the last pass of a period there is a frame to draw between the ticks whether or not RENDERHOLD
+    // is on; at t = 1 the branch is RENDERHOLD's own, so it keeps that switch.
+    } else if (row_SMOOTH002.on && !g_disabled && !g_applied_inv && smooth_live(2) && !(g_bis & 2) &&
+               g_kind == INV_BUILD && (g_renderhold || t < 1.0f)) {
         g_applied_inv = true;
         applied = true;
         __try { apply_render(t); }
@@ -277,6 +351,7 @@ static void __cdecl h_draw() {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 #endif
+    if (g_scrub) scrub_stack();
     g_draw();
 }
 
@@ -392,6 +467,7 @@ static bool install() {
     g_warp_min = (float)config_row("SMOOTH-002-WARP-MIN", 30);
     g_warp_ratio = (float)config_row("SMOOTH-002-WARP-RATIO", 3);
     g_renderhold = config_row("SMOOTH-002-RENDERHOLD", 1);
+    g_scrub = config_row("SMOOTH-002-SCRUB", 1);
 #ifdef FPS60_DEV
     g_trace_id = config_row("SMOOTH-002-TRACE-ID", 0);
     g_trace_max = config_row("SMOOTH-002-TRACE-N", 4000);
@@ -409,6 +485,7 @@ static bool install() {
              "warp guard %d (min %.0f, ratio %.0f); renderhold %d; F7 toggles",
              rt_to_gva_exe(fn), rt_to_gva_exe(sites[0]), rt_to_gva_exe(sites[1]), rt_to_gva_exe((const void*)g_table),
              rt_to_gva_exe((const void*)g_count), g_nocloth, g_childrel, g_diag, g_warp, g_warp_min, g_warp_ratio, g_renderhold);
+    log_line("  SMOOTH-002: stack scrub before Ch_DrawMain %s (SMOOTH-002-SCRUB)", g_scrub ? "ON" : "OFF");
     return true;
 }
 

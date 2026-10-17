@@ -104,6 +104,7 @@
     <ClCompile Include="src\x\rate.cpp" />
     <ClCompile Include="src\x\rollback.cpp" />
     <ClCompile Include="src\x\rows.cpp" />
+    <ClCompile Include="src\x\text.cpp" />
     <ClCompile Include="src\x\capture.cpp" />
     <ClCompile Include="src\x\capture_config.cpp" />
     <ClCompile Include="src\x\rows\RATE-001.cpp" />
@@ -112,6 +113,7 @@
     <ClCompile Include="src\x\rows\ppp_pause.cpp" />
     <ClCompile Include="src\x\rows\W2A-002.cpp" />
     <ClCompile Include="src\x\rows\CLK-002.cpp" />
+    <ClCompile Include="src\x\rows\CLK-013.cpp" />
     <ClCompile Include="src\x\rows\MAG-009.cpp" />
     <ClCompile Include="src\x\rows\MAG-016.cpp" />
     <ClCompile Include="src\x\rows\LOOP-005.cpp" />
@@ -147,6 +149,8 @@
     <ClCompile Include="src\x\rows\UI-BTLL1.cpp" />
     <ClCompile Include="src\x\rows\DEV-STOCK.cpp" />
     <ClCompile Include="src\x\rows\DEV-TURBO.cpp" />
+    <ClCompile Include="src\x\rows\DEV-DMG.cpp" />
+    <ClCompile Include="src\x\rows\QOL-SAVEICON.cpp" />
     <ClCompile Include="src\x\rows\FX-010.cpp" />
     <ClCompile Include="src\x\rows\DIAG-HANGDUMP.cpp" />
     <ClCompile Include="src\x\rows\DIAG-BTLSIG.cpp" />

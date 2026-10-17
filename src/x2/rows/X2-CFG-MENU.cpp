@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: Apache-2.0
+// X2-CFG-MENU (default on, port of the FFX mod's CFG-MENU): the mod's user options as extra rows of the game's own
+// main-menu Config page. Static RE: outer repo re/ledger/CFG-MENU-X2.md (CFGX2-001..021, S unless tagged). Ghidra VAs.
+//
+// - The page (module slot 8, descriptor 0xD63924) draws the pointer array [0x16D5F40] of 0x20-byte row objects, count
+//   = signed byte [0x16D5F48]; the setup 0x7889C0 resets both to a static array (9 or 10 rows) every time the menu
+//   opens. The page already scrolls (9-row window, scroll bar, page jump), so more rows need no layout change.
+// - The enter 0x788920 (cdecl(desc, arg), plain RET) is detoured: before it runs, the array is pointed at a mod copy
+//   (the stock rows + ours) and the count raised; the original then calls every row's init (+0x10).
+// - Row object: +2 label id, +4 value count, +6/+8/+A value ids, +0xC current value, +0x10 init(row*), +0x14
+//   apply(row*), +0x1C mode (must be 0). Left/right only change +0xC (clamped); the leave 0x788970 calls every apply
+//   once when the page is closed, so the options change and fps60x2.ini is written then (no extra detour).
+// - Text: label/value FUN_00779170(id) and help FUN_00779150(id) (cdecl, plain RET, menu_txt, many callers) are
+//   detoured; ids 0x7E00..0x7E7F are ours (stock ids 0x10B4..0x10D3; the page reads ids sign-extended, so <= 0x7FFF),
+//   every other id passes through. Help is looked up by the current value's id, so each value has its own id. The help
+//   setter keeps the pointer: our text is static (x2_text_strings.h). Both functions are resolved from their unique
+//   call sites 0x789B1E / 0x7891B4 (the 20-byte wrapper pattern has 3 hits).
+// - Glyph map: FFX-2 menu_txt of all 8 languages decodes with the FFX-2 tables (S, data); the strings are generated
+//   with those tables (tools/gen_text_x2.py). ON/OFF are the game's own words per language.
+// - Options whose row was off at startup are shown and saved, and take effect at the next start (row_set never installs
+//   at runtime). Soft Reset is the [x2] soft_reset key: off writes 0, on writes the default chord unless one is set.
+#include "../x2.h"
+#include "../x2_text_strings.h"
+#include "x2_smooth.h"
+#include <string.h>
+
+namespace x2 {
+
+extern Row row_CFGMENU, row_MENU002, row_SR003, row_DEVTURBO, row_CHR002, row_SMOOTH001, row_SMOOTH002, row_SMOOTH003, row_VSYNC;
+
+#pragma pack(push, 1)
+struct CfgRow {                                    // CFGX2-005
+    uint16_t enabled;                              // +0x00 written by some stock inits, never read
+    int16_t  label;                                // +0x02
+    int16_t  nvals;                                // +0x04
+    int16_t  vals[3];                              // +0x06
+    int16_t  cur;                                  // +0x0C
+    uint16_t pad;
+    void (__cdecl* init)(CfgRow*);                 // +0x10
+    void (__cdecl* apply)(CfgRow*);                // +0x14
+    uint32_t vib;                                  // +0x18 (1 only on the stock Vibration row, never read)
+    uint32_t mode;                                 // +0x1C 1 = screen-position editor: 0 here
+};
+#pragma pack(pop)
+static_assert(sizeof(CfgRow) == 0x20, "row object");
+
+typedef void (__cdecl* enter_t)(void* desc, int arg);
+typedef const uint8_t* (__cdecl* text_t)(int id);
+
+static uint8_t* g_enter_fn = nullptr;
+static uint8_t* g_label_fn = nullptr;
+static uint8_t* g_help_fn = nullptr;
+static enter_t  g_enter_tramp = nullptr;
+static text_t   g_label_tramp = nullptr, g_help_tramp = nullptr;
+static void* volatile*  g_arr = nullptr;            // [0x16D5F40]
+static volatile int8_t* g_cnt = nullptr;            // [0x16D5F48]
+static bool g_hooked = false;
+
+enum { ID_LABEL = 0x7E00, ID_VALUE = 0x7E40, MAX_STOCK = 32 };
+
+// ---------------------------------------------------------------- options
+// v = value index as shown: ON (0) / OFF (1), the stock order.
+struct Opt {
+    int  label, help_on, help_off;
+    int  (*get)();                                 // 1 = on
+    void (*set)(bool on);                          // runtime (installed rows only)
+    const char* sect;                              // ini
+    const char* key;
+    int  want;                                     // the code default at first, then the saved choice
+    bool (*live)();                                // the runtime state follows the choice
+};
+
+static bool smooth_installed() { return row_SMOOTH001.installed || row_SMOOTH002.installed || row_SMOOTH003.installed; }
+static int  get_fps()     { return g_cfg.pacing != 0; }
+static void set_fps(bool on) { pacing_set(on); }
+static bool live_always() { return true; }
+static int  get_smooth()  { return smooth_get_live(); }
+static void set_smooth(bool on) { smooth_set_live(on); }
+static int  get_menu()    { return menu002_user_on(); }
+static void set_menu(bool on) { menu002_set_user(on); }
+static bool live_menu()   { return row_MENU002.installed != 0; }
+static int  get_reset()   { return row_SR003.on != 0; }
+static void set_reset(bool on) { row_set(row_SR003, on); }
+static bool live_reset()  { return row_SR003.installed != 0; }
+static int  get_turbo()   { return row_DEVTURBO.on != 0; }
+static void set_turbo(bool on) { row_set(row_DEVTURBO, on); }
+static bool live_turbo()  { return row_DEVTURBO.installed != 0; }
+static int  get_idle()    { return row_CHR002.on != 0; }
+static void set_idle(bool on) { row_set(row_CHR002, on); }
+static bool live_idle()   { return row_CHR002.installed != 0; }
+static int  get_vsync()   { return row_VSYNC.on != 0; }
+static void set_vsync(bool on) { row_set(row_VSYNC, on); }
+static bool live_vsync()  { return row_VSYNC.installed != 0; }
+
+static Opt g_opts[] = {
+    { T_L_FPS,    T_H_FPS_ON,    T_H_FPS_OFF,    get_fps,    set_fps,    "x2",   "pacing",       1, live_always },
+    { T_L_SMOOTH, T_H_SMOOTH_ON, T_H_SMOOTH_OFF, get_smooth, set_smooth, "rows", "X2-SMOOTH",    1, smooth_installed },
+    { T_L_MENU,   T_H_MENU_ON,   T_H_MENU_OFF,   get_menu,   set_menu,   "rows", "X2-MENU-002",  1, live_menu },
+    { T_L_RESET,  T_H_RESET_ON,  T_H_RESET_OFF,  get_reset,  set_reset,  "x2",   "soft_reset",   1, live_reset },
+    { T_L_TURBO,  T_H_TURBO_ON,  T_H_TURBO_OFF,  get_turbo,  set_turbo,  "rows", "X2-DEV-TURBO", 1, live_turbo },
+    { T_L_IDLE,   T_H_IDLE_ON,   T_H_IDLE_OFF,   get_idle,   set_idle,   "rows", "X2-CHR-002",   1, live_idle },
+    { T_L_VSYNC,  T_H_VSYNC_ON,  T_H_VSYNC_OFF,  get_vsync,  set_vsync,  "rows", "X2-VSYNC",     0, live_vsync },
+};
+enum { N_OPTS = sizeof(g_opts) / sizeof(g_opts[0]) };
+
+static CfgRow g_rows[N_OPTS];
+static void*  g_ours[MAX_STOCK + N_OPTS];
+static void*  g_stock[MAX_STOCK];
+static int    g_stock_n = 0;
+
+static int opt_of(CfgRow* r) {
+    int i = (int)(r - g_rows);
+    return i >= 0 && i < N_OPTS ? i : -1;
+}
+
+static bool shown_on(int i) { return g_opts[i].live() ? g_opts[i].get() != 0 : g_opts[i].want != 0; }
+
+static void __cdecl row_init(CfgRow* r) {
+    int i = opt_of(r);
+    if (i >= 0) r->cur = shown_on(i) ? 0 : 1;
+}
+
+static void save(int i, bool on) {
+    Opt& o = g_opts[i];
+    char v[96];
+    if (!strcmp(o.key, "soft_reset")) {
+        config_str("x2", "soft_reset", v, sizeof(v), "");
+        if (on) { if (!v[0] || !strcmp(v, "0") || !_stricmp(v, "off")) strcpy_s(v, "L1+L2+R1+R2+START+SELECT"); }
+        else strcpy_s(v, "0");
+    } else strcpy_s(v, on ? "1" : "0");
+    if (!config_write(o.sect, o.key, v)) log_line("X2-CFG-MENU: could not write [%s] %s=%s", o.sect, o.key, v);
+}
+
+static void __cdecl row_apply(CfgRow* r) {
+    int i = opt_of(r);
+    if (i < 0 || r->cur < 0 || r->cur > 1) return;
+    bool on = r->cur == 0;
+    if (on == shown_on(i)) return;                 // unchanged
+    __try {
+        Opt& o = g_opts[i];
+        o.want = on ? 1 : 0;
+        if (o.live()) o.set(on);
+        save(i, on);
+        log_line("X2-CFG-MENU: %s -> %s%s", o.key, on ? "ON" : "OFF", o.live() ? "" : " (takes effect at the next start)");
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_line("X2-CFG-MENU: %s apply faulted", g_opts[i].key);
+    }
+}
+
+// ---------------------------------------------------------------- detours
+static void __cdecl h_enter(void* desc, int arg) {
+    __try {
+        void* arr = *g_arr;
+        int n = *g_cnt;
+        if (arr != (void*)g_ours && n > 0 && n <= MAX_STOCK) {   // the setup put a stock array back: take it
+            memcpy(g_stock, arr, n * sizeof(void*));
+            g_stock_n = n;
+        }
+        if (g_stock_n > 0) {
+            memcpy(g_ours, g_stock, g_stock_n * sizeof(void*));
+            for (int i = 0; i < N_OPTS; i++) g_ours[g_stock_n + i] = &g_rows[i];
+            *g_arr = g_ours;
+            *g_cnt = (int8_t)(g_stock_n + N_OPTS);
+            static bool logged = false;
+            if (!logged) { logged = true; log_line("X2-CFG-MENU: Config page with %d stock + %d mod rows", g_stock_n, N_OPTS); }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_line("X2-CFG-MENU: enter faulted - stock rows");
+    }
+    g_enter_tramp(desc, arg);
+}
+
+static const uint8_t* __cdecl h_label(int id) {
+    int u = id & 0xFFFF;
+    if (row_CFGMENU.on) {
+        if (u >= ID_LABEL && u < ID_LABEL + N_OPTS) return x2_text(g_opts[u - ID_LABEL].label);
+        if (u >= ID_VALUE && u < ID_VALUE + 2 * N_OPTS) return x2_text((u - ID_VALUE) & 1 ? T_V_OFF : T_V_ON);
+    }
+    return g_label_tramp(id);
+}
+
+static const uint8_t* __cdecl h_help(int id) {
+    int u = id & 0xFFFF;
+    if (row_CFGMENU.on && u >= ID_VALUE && u < ID_VALUE + 2 * N_OPTS) {
+        const Opt& o = g_opts[(u - ID_VALUE) / 2];
+        return x2_text((u - ID_VALUE) & 1 ? o.help_off : o.help_on);
+    }
+    return g_help_tramp(id);
+}
+
+// ---------------------------------------------------------------- row
+static bool install() {
+    // Enter 0x788920: PUSH EBP; MOV EBP,ESP; MOV EAX,[EBP+8]; PUSH ESI; MOV [EAX+0x1C],0; MOV byte [..],1; CALL; CALL;
+    // XOR ESI,ESI; CMP byte [count],0; JLE; LEA EBX,[EBX]; MOV EAX,[array]; MOV EAX,[EAX+ESI*4]; PUSH EAX; MOV EAX,[EAX+0x10]; CALL EAX
+    g_enter_fn = sig_find("X2-CFG-MENU Config page enter",
+        "55 8B EC 8B 45 08 56 C7 40 1C 00 00 00 00 C6 05 ?? ?? ?? ?? 01 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 F6 80 3D ?? ?? ?? ?? 00 "
+        "7E 23 8D 9B 00 00 00 00 A1 ?? ?? ?? ?? 8B 04 B0 50 8B 40 10 FF D0", 0x788920);
+    if (!g_enter_fn) return false;
+    g_cnt = (volatile int8_t*)abs_operand("Config row count", g_enter_fn + 0x23);
+    g_arr = (void* volatile*)abs_operand("Config row array", g_enter_fn + 0x31);
+    if (!g_cnt || !g_arr) return false;
+    // label call site 0x789B1E: MOV EAX,[array]; MOV EDI,[EBP-0x60]; MOV EAX,[EAX+EDI*4]; MOVSX EAX,word [EAX+2]; PUSH EAX; CALL label
+    uint8_t* ls = sig_find("X2-CFG-MENU label call site",
+        "A1 ?? ?? ?? ?? 8B 7D A0 8B 04 B8 0F BF 40 02 50 E8 ?? ?? ?? ?? 8B F0", 0x789B1E);
+    // help call site 0x7891B4: MOV EAX,[array]; MOV ECX,[EAX+EDX*4]; MOVSX EAX,word [ECX+0xC]; MOVSX EAX,word [ECX+EAX*2+6];
+    // PUSH EAX; CALL help; PUSH EAX; CALL help setter
+    uint8_t* hs = sig_find("X2-CFG-MENU help call site",
+        "A1 ?? ?? ?? ?? 8B 0C 90 0F BF 41 0C 0F BF 44 41 06 50 E8 ?? ?? ?? ?? 50 E8 ?? ?? ?? ??", 0x7891B4);
+    if (!ls || !hs) return false;
+    if (abs_operand("Config row array", ls + 1) != (uint8_t*)g_arr || abs_operand("Config row array", hs + 1) != (uint8_t*)g_arr) {
+        log_line("  X2-CFG-MENU: call sites read another row array - off");
+        return false;
+    }
+    g_label_fn = call_target(ls + 0x10);
+    g_help_fn = call_target(hs + 0x12);
+    // both: PUSH EBP; MOV EBP,ESP; PUSH 0; PUSH [EBP+8]; PUSH 1; CALL text; ADD ESP,0xC; POP EBP; RET
+    const char* wrap = "55 8B EC 6A 00 FF 75 08 6A 01 E8 ?? ?? ?? ?? 83 C4 0C 5D C3";
+    if (!g_label_fn || !g_help_fn || !sig_match(g_label_fn, wrap) || !sig_match(g_help_fn, wrap)) {
+        log_line("  X2-CFG-MENU: text functions not as proven - off");
+        return false;
+    }
+    for (int i = 0; i < N_OPTS; i++) {
+        CfgRow& r = g_rows[i];
+        memset(&r, 0, sizeof(r));
+        r.label = (int16_t)(ID_LABEL + i);
+        r.nvals = 2;
+        r.vals[0] = (int16_t)(ID_VALUE + 2 * i);
+        r.vals[1] = (int16_t)(ID_VALUE + 2 * i + 1);
+        r.vals[2] = 0xFF;
+        r.init = row_init;
+        r.apply = row_apply;
+        Opt& o = g_opts[i];
+        o.want = !strcmp(o.key, "soft_reset") ? config_row("X2-SR-003", 1)
+               : !strcmp(o.key, "pacing") ? g_cfg.pacing : config_row(o.key, o.want);
+    }
+    x2_text(0);                                     // resolve the language pointer now (sig scan), not on the first draw
+    log_line("  X2-CFG-MENU: enter gva=0x%08X (0x00788920), rows gva=0x%08X (0x016D5F40) count gva=0x%08X (0x016D5F48), "
+             "label text gva=0x%08X (0x00779170), help text gva=0x%08X (0x00779150); %d mod rows, ids 0x%X+",
+             rt_to_gva(g_enter_fn), rt_to_gva((const void*)g_arr), rt_to_gva((const void*)g_cnt), rt_to_gva(g_label_fn),
+             rt_to_gva(g_help_fn), N_OPTS, ID_LABEL);
+    return true;
+}
+
+static void pre() {
+    if (g_hooked) return;
+    g_hooked = true;
+    if (!hook_entry("X2-CFG-MENU label text", g_label_fn, (void*)&h_label, (void**)&g_label_tramp)) goto fail;
+    if (!hook_entry("X2-CFG-MENU help text", g_help_fn, (void*)&h_help, (void**)&g_help_tramp)) { hook_remove(g_label_fn); goto fail; }
+    if (!hook_entry("X2-CFG-MENU enter", g_enter_fn, (void*)&h_enter, (void**)&g_enter_tramp)) {
+        hook_remove(g_label_fn); hook_remove(g_help_fn); goto fail;
+    }
+    log_line("X2-CFG-MENU: hooked on the game thread");
+    return;
+fail:
+    log_line("X2-CFG-MENU: hook failed - row off");
+    row_CFGMENU.on = 0;
+}
+
+Row row_CFGMENU = {
+    "X2-CFG-MENU",
+    "the mod's options (60 FPS, Smooth Motion, 60 FPS Menu, Soft Reset, Turbo, Idle Motion, V-Sync) on the main-menu Config page",
+    1, install, pre, nullptr, 0
+};
+
+} // namespace x2
