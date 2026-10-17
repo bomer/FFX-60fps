@@ -296,6 +296,31 @@ static void diff_slots(const char* why) {
     g_slot_sig = sig;
 }
 
+// "Load Character" FUN_0082a1c0 (cdecl(path, a, b, flags), plain RET 0x82A31B/0x82A377; one caller 0x82A002): the
+// retry's first loaded chr was m175 (D 03:38, table 0x012FC598). Monster loads are logged with the FFX.exe return
+// addresses of the stack, from the fresh battle to 40 s into the retry.
+typedef void*(__cdecl* chrload_t)(const char* path, int a, int b, uint32_t flags);
+static chrload_t g_chrload = nullptr;
+static uint8_t* g_chrload_fn = nullptr;
+static void* __cdecl h_chrload(const char* path, int a, int b, uint32_t flags) {
+    if (g_diff && (g_diff_phase != 0 || g_slot_log_until > 0)) {
+        __try {
+            if (path && strstr(path, "mon")) {
+                void* fr[16];
+                USHORT nf = RtlCaptureStackBackTrace(0, 16, fr, nullptr);
+                char chain[160]; int n = 0;
+                uint8_t* eb = exe_base(); uint32_t es = exe_size();
+                for (USHORT i = 0; i < nf && n < (int)sizeof(chain) - 12; i++)
+                    if ((uint8_t*)fr[i] >= eb && (uint8_t*)fr[i] < eb + es)
+                        n += _snprintf(chain + n, sizeof(chain) - n, " %08X", rt_to_gva_exe(fr[i]));
+                chain[n] = 0;
+                log_line("QOL-RETRY-DIFF: load chr %s (phase %d, a8e0 0x%02X) from%s", path, g_diff_phase, *g_a8e0, chain);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return g_chrload(path, a, b, flags);
+}
+
 static void diff_step_body() {
     uint8_t st = *g_a8e0;
     // lost attempt in battle (2), the retry's entry states (4), and 40 s of the retry (after the report)
@@ -446,6 +471,9 @@ static void pre() {
             return;
         }
         log_line("QOL-RETRY: battle setup and post-battle hooked on the game thread");
+        if (g_diff && g_chrload_fn &&
+            !hook_entry("QOL-RETRY-DIFF load chr", g_chrload_fn, (void*)&h_chrload, (void**)&g_chrload))
+            log_line("QOL-RETRY-DIFF: load chr hook failed - not logged");
     }
     if (g_disabled) return;
     __try {
@@ -573,6 +601,9 @@ static bool install() {
     g_chord = config_row("QOL-RETRY-CHORD", 1) != 0;
     g_style = config_row("QOL-RETRY-STYLE", 0);
     g_diff = config_row("QOL-RETRY-DIFF", 0);
+    if (g_diff)                                      // one match in fps60_image.bin
+        g_chrload_fn = sig_find_unique("QOL-RETRY-DIFF load chr FUN_0082a1c0",
+            "55 8B EC 81 EC 84 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 53 8B 5D 14 56 8B 75 08 57 68 80 00 00 00", 0x82A1C0);
     g_setup_fn = sig_find_unique("QOL-RETRY MsBattleSetupEncounter",
         "55 8B EC 53 56 57 E8 ?? ?? ?? ?? 8B 5D 08 85 C0 74 28 85 DB 75 37 68", 0x781020);
     g_post_fn = sig_find_unique("QOL-RETRY post-battle FUN_00861160",
