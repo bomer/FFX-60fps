@@ -321,6 +321,49 @@ static void* __cdecl h_chrload(const char* path, int a, int b, uint32_t flags) {
     return g_chrload(path, a, b, flags);
 }
 
+// Monster chr caches (D 03:43: the transformation's magic DLL loads m175 from its start handler; the retry loads no
+// monster chr at all, so it reuses a resident one): the Memory Cache, 100 entry pointers at 0x01302F98 (entry +0 id,
+// +4 kind (1 = chr), +6 state, +0xC data, +0x10.. objects; FUN_0083ffe0/FUN_00840560/FUN_00840680), and the field
+// workers FUN_0086a830(i), i < [0x01325BAC] (u8), with the field context 0x01325BA0 current (as FUN_00866240):
+// +0xA8 chr id, +0x9C chr, +0xA4, +0x33/+0x38 flags. Monster ids (0x1000..0x1FFF) only.
+typedef int(__cdecl* worker_t)(int);
+static void diff_cache(const char* why) {
+    uint8_t* eb = exe_base();
+    auto at = [eb](uint32_t va) { return eb + (va - 0x400000); };
+    uint32_t** tbl = (uint32_t**)at(0x01302F98);
+    for (int i = 0; i < 100; i++) {
+        uint32_t* e = tbl[i];
+        if (!e || !e[3] || (e[0] & 0xF000) != 0x1000 || (uint8_t)e[1] != 1) continue;
+        log_line("QOL-RETRY-DIFF: cache %s: [%d] id %04X state %d data %08X obj %08X %08X %08X %08X", why, i, e[0],
+                 ((uint8_t*)e)[6], e[3], e[4], e[5], e[6], e[7]);
+    }
+}
+
+static void diff_workers(const char* why) {         // the context pointer is restored even on a fault
+    uint8_t* eb = exe_base();
+    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
+    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
+    uint8_t* saved = *ctx;
+    *ctx = eb + (0x01325BA0 - 0x400000);
+    __try {
+        int n = *(eb + (0x01325BAC - 0x400000));
+        for (int i = 0; i < n; i++) {
+            uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
+            if (!w) continue;
+            uint16_t id = *(uint16_t*)(w + 0xA8);
+            if ((id & 0xF000) != 0x1000) continue;
+            log_line("QOL-RETRY-DIFF: worker %s: [%d] chr id %04X chr %08X +A4 %08X fl33 %02X fl38 %04X", why, i, id,
+                     *(uint32_t*)(w + 0x9C), *(uint32_t*)(w + 0xA4), w[0x33], *(uint16_t*)(w + 0x38));
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: worker dump faulted"); }
+    *ctx = saved;
+}
+
+static void diff_chr(const char* why) {
+    __try { diff_cache(why); } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-DIFF: cache dump faulted"); }
+    diff_workers(why);
+}
+
 static void diff_step_body() {
     uint8_t st = *g_a8e0;
     // lost attempt in battle (2), the retry's entry states (4), and 40 s of the retry (after the report)
@@ -331,6 +374,7 @@ static void diff_step_body() {
         diff_copy(false);
         g_diff_phase = 3;
         log_line("QOL-RETRY-DIFF: end copy at the prompt");
+        diff_chr("prompt");
     } else if (g_diff_phase == 1 && st == 1) {
         diff_copy(true);
         memcpy(g_prev, g_rgn[0].p, g_rgn[0].len);
@@ -340,11 +384,13 @@ static void diff_step_body() {
         g_diff_phase = 2;
         log_line("QOL-RETRY-DIFF: fresh copy at state 1");
         __try { diff_slots("fresh state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        diff_chr("fresh state 1");
     } else if (g_diff_phase == 2) {
         diff_window();
     } else if (g_diff_phase == 4 && st == 1) {
         g_diff_phase = 0;
         __try { diff_slots("retry state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        diff_chr("retry state 1");
         g_slot_log_until = 2400;
         diff_report();
     }
@@ -363,7 +409,7 @@ static void diff_step() {                           // from pre(), each invocati
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
     if (g_diff && mode == 0) {
-        if (g_reissue && g_diff_phase == 3) g_diff_phase = 4;
+        if (g_reissue && g_diff_phase == 3) { g_diff_phase = 4; diff_chr("retry setup"); }
         else if (!g_reissue && diff_alloc()) g_diff_phase = 1;
     }
     if (!g_disabled && mode == 0 && g_save_len) {
