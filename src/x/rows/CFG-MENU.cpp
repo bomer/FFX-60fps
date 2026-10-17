@@ -18,6 +18,7 @@
 #include "../fps60.h"
 #include "smooth.h"
 #include <string.h>
+#include <stdio.h>
 
 struct CfgRow {                                     // CONFIG-MENU-004
     uint32_t zero;
@@ -48,8 +49,47 @@ static bool g_dirty = false;
 
 // ---------------------------------------------------------------- options
 // v = value index as shown: binary rows are ON (0) / OFF (1), the stock order.
-static int  get_fps()     { return g_cfg.pacing ? 0 : 1; }
-static void set_fps(int v) { pacing_set(v == 0); }
+// Frame Rate, highest first, with 0 standing for the game's own 30 fps pacing. A Config row object has room
+// for exactly four values (CfgRow is 0x2C bytes), but the ini accepts any multiple of 30 from 60 to 240, so
+// the four shown are built at install from the rate the player actually asked for - picking 180 in the ini
+// puts 180 on the page. A rate the host limiter cannot be moved to is refused by rate_set_fps, and the row
+// snaps back to what is really in force (row_apply logs it).
+static int k_fps[4] = { 240, 120, 60, 0 };
+static char g_fps_val[4][12];
+static char g_fps_help[4][64];
+
+static void build_fps_values() {
+    int want[4] = { rate_user_fps(), 240, 180, 120 }, n = 0, pick[3];   // the player's rate always survives
+    for (int i = 0; i < 4 && n < 3; i++) {
+        bool dup = false;
+        for (int j = 0; j < n; j++) if (pick[j] == want[i]) dup = true;
+        if (!dup) pick[n++] = want[i];
+    }
+    for (int i = 0; i < n; i++)                                  // highest first
+        for (int j = i + 1; j < n; j++)
+            if (pick[j] > pick[i]) { int t = pick[i]; pick[i] = pick[j]; pick[j] = t; }
+    for (int i = 0; i < 3; i++) k_fps[i] = i < n ? pick[i] : 60;
+    k_fps[3] = 0;
+    for (int i = 0; i < 4; i++) {
+        int f = k_fps[i] ? k_fps[i] : 30;
+        _snprintf_s(g_fps_val[i], sizeof(g_fps_val[i]), _TRUNCATE, "%d", f);
+        _snprintf_s(g_fps_help[i], sizeof(g_fps_help[i]), _TRUNCATE, "%d frames per second.%s", f,
+                    !k_fps[i] ? " The original speed." : f > 60 ? " Needs V-Sync off." : "");
+    }
+}
+static int  get_fps() {
+    if (!g_cfg.pacing) return 3;
+    int f = rate_user_fps();                                     // not a rate PERF-002 stepped down to
+    for (int i = 0; i < 3; i++) if (k_fps[i] == f) return i;
+    for (int i = 0; i < 3; i++) if (k_fps[i] <= f) return i;     // built from it, so this is only a safety net
+    return 2;
+}
+static void set_fps(int v) {
+    if (v < 0 || v > 3) return;
+    if (!k_fps[v]) { pacing_set(false); return; }
+    if (k_fps[v] != rate_user_fps() && !rate_set_fps(k_fps[v])) return;   // refused: pacing is left as it was
+    pacing_set(true);
+}
 static int  get_smooth()  { return smooth_enabled() ? 0 : 1; }
 static void set_smooth(int v) { smooth_set(v == 0); }
 static int  row_get(Row& r) { return r.on ? 0 : 1; }
@@ -69,16 +109,16 @@ static void set_turbo(int v) { row_set(row_DEVTURBO, v == 0); }
 
 struct Opt {
     const char* label;
-    const char* vals[3];                            // nullptr = stock ON / OFF text
-    const char* help[3];                            // per value; nullptr = help[0]
+    const char* vals[4];                            // nullptr = stock ON / OFF text
+    const char* help[4];                            // per value; nullptr = help[0]
     int  nvals;
     int  (*get)();
     void (*set)(int v);
     bool (*enabled)();                              // nullptr = always selectable; else greyed out and skipped when false
 };
 
-static const Opt k_opts[] = {
-    { "60 FPS", {}, { "Run the game at 60 frames per second.", "Original 30 frames per second." }, 2, get_fps, set_fps },
+static Opt k_opts[] = {
+    { "Frame Rate", {}, {}, 4, get_fps, set_fps },      // values and help built by build_fps_values()
     { "Smooth Motion", {}, { "Smooth camera and character motion (F7 in game).",
       "Original camera and character motion." }, 2, get_smooth, set_smooth },
     { "Sensor (All)", {}, { "All party members have Sensor, no armor needed.",
@@ -114,8 +154,8 @@ static bool encode(const char* s, uint8_t* out, int n) {
 }
 
 static uint8_t g_txt_label[N_OPTS][24];
-static uint8_t g_txt_val[N_OPTS][3][12];
-static uint8_t g_txt_help[N_OPTS][3][64];
+static uint8_t g_txt_val[N_OPTS][4][12];
+static uint8_t g_txt_help[N_OPTS][4][64];
 
 static CfgRow g_rows[N_OPTS];
 static void*  g_arr[MAX_STOCK + N_OPTS];
@@ -204,7 +244,13 @@ static uint8_t* __cdecl h_help(uint32_t id) {
 static void write_ini() {
     g_dirty = false;
     const char* on01[2] = { "1", "0" };              // v 0 = ON
-    config_write("fps60", "pacing", on01[get_fps()]);
+    int fv = get_fps();
+    config_write("fps60", "pacing", k_fps[fv] ? "1" : "0");
+    if (k_fps[fv]) {
+        char fb[8];
+        _snprintf_s(fb, sizeof(fb), _TRUNCATE, "%d", k_fps[fv]);
+        config_write("fps60", "fps", fb);
+    }
     config_write("rows", "SMOOTH", on01[get_smooth()]);
     config_write("rows", "QOL-SENSOR", on01[get_sensor()]);
     config_write("rows", "QOL-AP", on01[get_ap()]);
@@ -218,7 +264,7 @@ static void write_ini() {
     if (get_reset() == 1) config_write("fps60", "soft_reset", "0");
     else if (off_now && b[0]) config_write("fps60", "soft_reset", "L1+L2+R1+R2+START+SELECT");
     log_line("CFG-MENU: fps60.ini written (0 = on: fps %d, smooth %d, sensor %d, ap %d rate %d, retry %d, reset %d, turbo %d)",
-             get_fps(), get_smooth(), get_sensor(), get_ap(), get_rate(), get_retry(), get_reset(), get_turbo());
+             k_fps[fv] ? k_fps[fv] : 30, get_smooth(), get_sensor(), get_ap(), get_rate(), get_retry(), get_reset(), get_turbo());
 }
 
 // ---------------------------------------------------------------- row
@@ -247,6 +293,11 @@ static bool install() {
     g_array = (void* volatile*)read_abs(g_enter_fn + 0x31);
     if (!g_cursor || !g_count || !g_array) return false;
 
+    build_fps_values();
+    for (int i = 0; i < 4; i++) {
+        k_opts[0].vals[i] = g_fps_val[i];
+        k_opts[0].help[i] = g_fps_help[i];
+    }
     for (int i = 0; i < N_OPTS; i++) {
         const Opt& o = k_opts[i];
         bool ok = encode(o.label, g_txt_label[i], sizeof(g_txt_label[i]));
@@ -254,7 +305,14 @@ static bool install() {
             if (o.vals[v]) ok = encode(o.vals[v], g_txt_val[i][v], sizeof(g_txt_val[i][v])) && ok;
             ok = encode(o.help[v] ? o.help[v] : o.help[0], g_txt_help[i][v], sizeof(g_txt_help[i][v])) && ok;
         }
-        if (!ok) { log_line("  CFG-MENU: text for '%s' does not fit the FFX charset - refused", o.label); return false; }
+        if (!ok) {
+            log_line("  CFG-MENU: text for '%s' does not fit (label %d/%d, value %d/%d, help %d/%d bytes, or a "
+                     "character outside the FFX charset) - refused", o.label, (int)strlen(o.label),
+                     (int)sizeof(g_txt_label[i]) - 1, o.vals[0] ? (int)strlen(o.vals[0]) : 0,
+                     (int)sizeof(g_txt_val[i][0]) - 1, o.help[0] ? (int)strlen(o.help[0]) : 0,
+                     (int)sizeof(g_txt_help[i][0]) - 1);
+            return false;
+        }
         CfgRow& r = g_rows[i];
         memset(&r, 0, sizeof(r));
         r.nvals = o.nvals;
@@ -264,6 +322,7 @@ static bool install() {
         r.label = ID_LABEL + i;
         for (int v = 0; v < o.nvals; v++) r.vals[v] = ID_VALUE + i * 4 + v;
     }
+    log_line("  CFG-MENU: Frame Rate row shows %d / %d / %d / 30 fps", k_fps[0], k_fps[1], k_fps[2]);
     log_line("  CFG-MENU: enter gva=0x%08X label gva=0x%08X help gva=0x%08X; cursor 0x%08X count 0x%08X array 0x%08X; %d rows",
              rt_to_gva_exe(g_enter_fn), rt_to_gva_exe(g_label_fn), rt_to_gva_exe(g_help_fn), rt_to_gva_exe((void*)g_cursor),
              rt_to_gva_exe((void*)g_count), rt_to_gva_exe((void*)g_array), N_OPTS);
@@ -298,6 +357,6 @@ static void stop() {
 
 Row row_CFGMENU = {
     "CFG-MENU",
-    "mod options (60 FPS, Smooth, Sensor, AP, Non-Fighter AP, Retry, Soft Reset, Turbo) as rows of the game's Config page",
+    "mod options (Frame Rate, Smooth, Sensor, AP, Non-Fighter AP, Retry, Soft Reset, Turbo) as rows of the game's Config page",
     1, install, pre, nullptr, 0, stop
 };
