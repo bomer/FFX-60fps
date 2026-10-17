@@ -267,8 +267,41 @@ static void diff_window() {                         // phase 2, each invocation
     memcpy(g_prev, d.p, d.len);
 }
 
+// Enemy slots (D 18/10/2026 03:33: no form flag among the carried .data values): per monster slot i < 8, the monster
+// record FUN_00795aa0(i) = i * 0xF90 + [0x01134468] (+0x0E id, +0x48 model data) and the battle block
+// FUN_00794020(0x14 + i) = (0x14 + i) * 0xF90 + [0x011334D4] (+0xF60 HP, +0x5A4 max HP, +0x590 flags).
+// Logged when anything in that set changes, from the fresh state 1 to 40 s into the retry.
+static uint32_t g_slot_sig = 0;
+static int g_slot_log_until = 0;
+static void diff_slots(const char* why) {
+    uint8_t* eb = exe_base();
+    uint8_t* mon = *(uint8_t**)(eb + (0x01134468 - 0x400000));
+    uint8_t* blk = *(uint8_t**)(eb + (0x011334D4 - 0x400000));
+    if (!mon || !blk) return;
+    char buf[640]; int n = 0;
+    uint32_t sig = 2166136261u;
+    for (int i = 0; i < 8; i++) {
+        uint8_t* m = mon + i * 0xF90;
+        uint8_t* b = blk + (0x14 + i) * 0xF90;
+        uint16_t id = *(uint16_t*)(m + 0xE);
+        int32_t hp = *(int32_t*)(b + 0xF60), mhp = *(int32_t*)(b + 0x5A4);
+        uint32_t data = *(uint32_t*)(m + 0x48), fl = *(uint8_t*)(b + 0x590);
+        sig = (sig ^ id) * 16777619u; sig = (sig ^ (uint32_t)hp) * 16777619u; sig = (sig ^ (data != 0)) * 16777619u;
+        sig = (sig ^ fl) * 16777619u;
+        if (id == 0xFFFF && !data) continue;
+        n += _snprintf(buf + n, sizeof(buf) - n, " [%d id %04X data %s hp %d/%d fl %02X]", i, id, data ? "y" : "n", hp, mhp, fl);
+        if (n >= (int)sizeof(buf) - 64) break;
+    }
+    if (why || sig != g_slot_sig) log_line("QOL-RETRY-DIFF: slots%s%s:%s", why ? " at " : "", why ? why : "", buf);
+    g_slot_sig = sig;
+}
+
 static void diff_step_body() {
     uint8_t st = *g_a8e0;
+    // lost attempt in battle (2), the retry's entry states (4), and 40 s of the retry (after the report)
+    bool watch = (g_diff_phase == 2 && st == 1) || g_diff_phase == 4 || (g_diff_phase == 0 && g_slot_log_until > 0);
+    if (g_diff_phase == 0 && g_slot_log_until > 0) --g_slot_log_until;
+    if (watch) { __try { diff_slots(nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (g_diff_phase == 25) {                       // the prompt opened last invocation: end copy, apart from the prompt
         diff_copy(false);
         g_diff_phase = 3;
@@ -281,10 +314,13 @@ static void diff_step_body() {
         g_tick = 0;
         g_diff_phase = 2;
         log_line("QOL-RETRY-DIFF: fresh copy at state 1");
+        __try { diff_slots("fresh state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     } else if (g_diff_phase == 2) {
         diff_window();
     } else if (g_diff_phase == 4 && st == 1) {
         g_diff_phase = 0;
+        __try { diff_slots("retry state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        g_slot_log_until = 2400;
         diff_report();
     }
 }
