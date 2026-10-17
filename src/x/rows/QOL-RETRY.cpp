@@ -406,7 +406,7 @@ static void chr_snap_take() {
         for (int i = 0; i < n; i++) {
             uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
             if (!w || (*(uint16_t*)(w + 0xA8) & 0xF000) != 0x1000) continue;
-            obj_add(*(uint8_t**)(w + 0x9C), 0x8000, "worker chr");
+            obj_add(*(uint8_t**)(w + 0x9C), 0x13000, "worker chr");
             obj_add(*(uint8_t**)(w + 0xA4), 0x4000, "worker +A4");
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -434,6 +434,31 @@ static void chr_snap_diff(const char* why) {
             }
         }
         log_line("QOL-RETRY-DIFF: %s %p %s: %d dwords changed, %d not float", r.what, r.p, why, changed, ints);
+    }
+}
+
+// QOL-RETRY-PARTFIX (test, default 0): the chr records every 0x880 bytes from +0x0BF4 (state dword, then two floats
+// that start at 1.0) were 2/2/3/3 at +0x1474/+0x1CF4/+0x2574/+0x2DF4 on the fresh state 1, 3/3/3/3 at the prompt
+// (form 2) and 2/2/2/2 at the retry's state 1 (form-2 body, U 18/10/2026). At the retry's state 1 the row writes the
+// records' three dwords back from the fresh copy of each field-worker chr and logs what it changed.
+static int g_partfix = 0;
+static void part_fix() {
+    for (int k = 0; k < g_obj_n; k++) {
+        ObjRgn& r = g_obj[k];
+        if (strcmp(r.what, "worker chr") != 0) continue;
+        int n = 0;
+        for (uint32_t o = 0x0BF4; o + 12 <= r.len; o += 0x880) {
+            if (!r.ok[o >> 12] || !r.ok[(o + 11) >> 12]) continue;
+            for (uint32_t i = 0; i < 12; i += 4) {
+                uint32_t* cur = (uint32_t*)(r.p + o + i);
+                uint32_t fr = *(uint32_t*)(r.fresh + o + i);
+                if (*cur == fr) continue;
+                log_line("QOL-RETRY-PARTFIX: chr %p +%05X %08X -> %08X", r.p, o + i, *cur, fr);
+                *cur = fr;
+                n++;
+            }
+        }
+        log_line("QOL-RETRY-PARTFIX: chr %p: %d dwords written back", r.p, n);
     }
 }
 
@@ -472,6 +497,7 @@ static void diff_step_body() {
         __try { diff_slots("retry state 1"); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         diff_chr("retry state 1");
         chr_snap_diff("retry state 1");
+        if (g_partfix) { __try { part_fix(); } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-PARTFIX: faulted"); } }
         g_slot_log_until = 2400;
         diff_report();
     }
@@ -728,6 +754,7 @@ static bool install() {
     g_chord = config_row("QOL-RETRY-CHORD", 1) != 0;
     g_style = config_row("QOL-RETRY-STYLE", 0);
     g_diff = config_row("QOL-RETRY-DIFF", 0);
+    g_partfix = config_row("QOL-RETRY-PARTFIX", 0);
     if (g_diff)                                      // one match in fps60_image.bin
         g_chrload_fn = sig_find_unique("QOL-RETRY-DIFF load chr FUN_0082a1c0",
             "55 8B EC 81 EC 84 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 53 8B 5D 14 56 8B 75 08 57 68 80 00 00 00", 0x82A1C0);
