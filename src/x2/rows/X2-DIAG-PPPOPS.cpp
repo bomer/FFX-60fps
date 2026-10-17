@@ -268,6 +268,36 @@ static void sum_after(int i, uint8_t* part, uint8_t* opd) {
         if (v == 0.0f) s.i_zero++;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
+// HD VFX instance calls inside FUN_00855830 (KeLnsArnd's submit): lookup FUN_004563d0 (0x855A46, 0 = no instance),
+// submit FUN_00456a00 (0x855A72), create FUN_007fdde0 (0x855AFB). Counted per invocation kind for dumped programs
+// (U 17/10/2026: the lens particle data and intensity are the same on logic and render-only frames, it still blinks).
+typedef int(__cdecl* look_t)(uint32_t, int);
+typedef void(__cdecl* sub_t)(uint32_t, int);
+typedef void(__cdecl* cre_t)(uint32_t, int, void*, int, uint32_t, uint32_t);
+static look_t g_look = nullptr; static sub_t g_sub = nullptr; static cre_t g_cre = nullptr;
+static uint8_t* g_vfx_site[3] = {};
+static LONG g_vfx[2][4];                          // lookups, lookups 0, submits, creates
+static bool in_dump_prog() {
+    int cls = 0;
+    uint8_t* prog = (uint8_t*)mag006_cur_step(&cls);
+    if (!prog) return false;
+    char mod[64]; uint32_t off;
+    module_of(prog, mod, sizeof(mod), &off);
+    return strstr(mod, g_dump_mod) != nullptr;
+}
+static int __cdecl h_look(uint32_t a, int b) {
+    int r = g_look(a, b);
+    if (in_dump_prog()) { int k = render_only() ? 1 : 0; g_vfx[k][0]++; if (!r) g_vfx[k][1]++; }
+    return r;
+}
+static void __cdecl h_sub(uint32_t a, int b) {
+    if (in_dump_prog()) g_vfx[render_only() ? 1 : 0][2]++;
+    g_sub(a, b);
+}
+static void __cdecl h_cre(uint32_t a, int b, void* c, int d, uint32_t e, uint32_t f) {
+    if (in_dump_prog()) g_vfx[render_only() ? 1 : 0][3]++;
+    g_cre(a, b, c, d, e, f);
+}
 static void sum_flush() {
     if (g_dump_lines >= 3000) return;
     for (int k = 0; k < 2; k++)
@@ -275,11 +305,15 @@ static void sum_flush() {
             Sum& s = g_sum[k][i];
             if (!s.n) continue;
             g_dump_lines++;
+            if (!strcmp(g_name[i], "pppKeLnsArnd"))
+                log_line("PPPVFX #%ld %s lookups %ld missing %ld submits %ld creates %ld", g_inv, k ? "R" : "L",
+                         g_vfx[k][0], g_vfx[k][1], g_vfx[k][2], g_vfx[k][3]);
             log_line("PPPSUM #%ld %s %-12s n %ld age0 %ld age %X..%X | 8F=0 %ld A8=0 %ld d0=0/null %ld d4=0 %ld | 7C after sum %.3f min %.3f max %.3f zero %ld",
                      g_inv, k ? "R" : "L", g_name[i] + 3, s.n, s.age0, s.amin, s.amax, s.z8f, s.za8, s.z0, s.z4,
                      (double)s.i_sum, (double)s.i_min, (double)s.i_max, s.i_zero);
             s = Sum{};
         }
+    memset(g_vfx, 0, sizeof(g_vfx));
 }
 static void dump_call(int i, uint8_t* part, uint8_t* key, uint8_t* opd) {
     if (g_dump_mode == 1) { sum_call(i, part, key, opd); return; }
@@ -396,6 +430,24 @@ static bool install() {
             if (hit) { g_mark_any = true; log_line("  X2-MAG-006-UNPAUSE-OPS: programs calling %s step unpaused on render-only", g_name[i]); }
         }
     }
+    // VFX sites: pppKeLnsArnd draw +0xCE = CALL FUN_00855830; its CALLs at +0x216 / +0x242 / +0x2CB
+    for (int i = 0; i < g_n; i++) {
+        if (strcmp(g_name[i], "pppKeLnsArnd") || !g_dump_op[i]) continue;
+        uint8_t* sub = (g_fn[i][0xCE] == 0xE8) ? call_target(g_fn[i] + 0xCE) : nullptr;
+        if (!sub || !in_image(sub) || !sig_match(sub, "53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04")) { log_line("  X2-DIAG-PPPOPS: FUN_00855830 not found - VFX counts off"); break; }
+        static const int offs[3] = { 0x216, 0x242, 0x2CB };
+        bool ok = true;
+        for (int k = 0; k < 3; k++) { g_vfx_site[k] = sub + offs[k]; if (g_vfx_site[k][0] != 0xE8 || !in_image(call_target(g_vfx_site[k]))) ok = false; }
+        // callee shapes (prologues read from FFX-2.exe 0x4563D0 / 0x456A00 / 0x7FDDE0)
+        if (ok && (!sig_match(call_target(g_vfx_site[0]), "55 8B EC 8B 4D 08 8B 55 0C 8B C1 0B C2 74") ||
+                   !sig_match(call_target(g_vfx_site[1]), "55 8B EC 83 3D ?? ?? ?? ?? 00 0F 85") ||
+                   !sig_match(call_target(g_vfx_site[2]), "55 8B EC 83 EC 08 53 8B 5D 0C 57 FF 75 1C 8B 7D 08"))) ok = false;
+        if (!ok) { log_line("  X2-DIAG-PPPOPS: FUN_00855830 CALL sites not as proven - VFX counts off"); g_vfx_site[0] = nullptr; break; }
+        g_look = (look_t)call_target(g_vfx_site[0]); g_sub = (sub_t)call_target(g_vfx_site[1]); g_cre = (cre_t)call_target(g_vfx_site[2]);
+        log_line("  X2-DIAG-PPPOPS: FUN_00855830 gva=0x%08X, lookup 0x%08X submit 0x%08X create 0x%08X (expected 0x004563D0 / 0x00456A00 / 0x007FDDE0)",
+                 rt_to_gva(sub), rt_to_gva((void*)g_look), rt_to_gva((void*)g_sub), rt_to_gva((void*)g_cre));
+        break;
+    }
     char tr[256];
     config_str("rows", "X2-DIAG-PPPOPS-CALLERS", tr, sizeof(tr), "pppKeShpTail3X pppKeLnsFls");
     for (int i = 0; i < g_n; i++) {
@@ -418,6 +470,12 @@ static void pre() {
         if (hook_entry("X2-DIAG-PPPOPS", g_fn[i], DETOURS[i], (void**)&g_orig[i])) hooked++;
         else log_line("X2-DIAG-PPPOPS: %s gva=0x%08X not hooked", g_name[i], rt_to_gva(g_fn[i]));
     log_line("X2-DIAG-PPPOPS: %d of %d draw ops hooked", hooked, g_n);
+    if (g_vfx_site[0]) {
+        bool ok = patch_call_rel32(g_vfx_site[0], (void*)g_look, (void*)&h_look) &&
+                  patch_call_rel32(g_vfx_site[1], (void*)g_sub, (void*)&h_sub) &&
+                  patch_call_rel32(g_vfx_site[2], (void*)g_cre, (void*)&h_cre);
+        log_line("X2-DIAG-PPPOPS: FUN_00855830 VFX call sites %s", ok ? "patched (counting)" : "patch failed");
+    }
     mag006_set_step_note(&step_note);
 }
 
