@@ -27,7 +27,7 @@ void smooth_poll_hotkey() {
     // Dev hotkey Num 2 bisects: SMOOTH-001 off -> SMOOTH-002 off -> SMOOTH-003 off -> none (U 12/10/2026: one-frame
     // boss ghost in the Echuilles battle, gone with F7).
     static bool prev2 = false;
-    if (dev_key(VK_NUMPAD2, &prev2)) {
+    if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000) && dev_key(VK_NUMPAD2, &prev2)) {
         g_off_row = (g_off_row + 1) % 4;
         if (g_off_row) log_line("Num2: only SMOOTH-00%ld off (others %s)", g_off_row, g_live ? "on" : "off by F7");
         else log_line("Num2: all SMOOTH rows follow F7 (%s)", g_live ? "on" : "off");
@@ -132,6 +132,20 @@ bool smooth_interp(const float* a, const float* b, float t, float cut_dist, floa
     if (!is_affine(a) || !is_affine(b)) return false;
     float d[3] = { b[12] - a[12], b[13] - a[13], b[14] - a[14] };
     if (dot3(d, d) > cut_dist * cut_dist) return false;           // warp / camera cut: no sweep
+    // Same 3x3 in both ticks: keep it bit-exact and lerp the translation only. The quaternion round trip below
+    // rebuilds the basis (orthonormal x row lengths); for a basis that is not exactly that (shear, rounding) the
+    // rebuilt one differs, so a static actor was drawn with a slightly different matrix on logic frames than on
+    // render-only frames (U 17/10/2026: save sphere ring, id 0x5001, scale 0.001, bright/dark every frame).
+    bool same3 = true;
+    for (int r = 0; r < 3 && same3; r++)
+        for (int c = 0; c < 4; c++) if (a[r * 4 + c] != b[r * 4 + c]) { same3 = false; break; }
+    if (same3) {
+        float o[16];
+        memcpy(o, b, 64);
+        for (int k = 0; k < 3; k++) o[12 + k] = a[12 + k] + t * d[k];
+        for (int i = 0; i < 16; i++) { if (!isfinite(o[i])) return false; out[i] = o[i]; }
+        return true;
+    }
     float la[3], lb[3], A[9], B[9];
     for (int r = 0; r < 3; r++) {
         la[r] = sqrtf(dot3(a + r * 4, a + r * 4));
