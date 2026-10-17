@@ -113,8 +113,8 @@ static void deferred_flush(void* prog, bool drop) {
 // to draw (pppKeShpTail3X / pppKeLns* 0 paused calls). Under 60 Hz pacing the free is deferred: the particle stays on the
 // program's list with age -= 0x1000 (the age it was drawn at), the paused step draws it unchanged (paused steps spawn,
 // age and free nothing), and it is unlinked and freed at the start of the program's next unpaused step, before that
-// step's spawn and ops (the stock order). Not deferred when it would empty a one-shot program's list (+0x1D: the step
-// would report the end one step late).
+// step's spawn and ops (the stock order). If that empties a one-shot program (+0x1D), the step is not run and reports the
+// end (flush_ended). (First build skipped one-shot last particles: the glow is one; U 17/10 13:19 still blinked.)
 typedef void(__cdecl* pfree_t)(void* part, int flag);
 static pfree_t   g_pfree = nullptr;               // FUN_00804b80
 static int       g_freedefer = 0;
@@ -131,16 +131,13 @@ static volatile LONG g_fq_ret = 0;
 static int __cdecl free_defer(uint8_t* part, uint8_t* prog) {
     if (!g_freedefer || !row_MAG006.on || g_disabled || pacing_kind() == INV_STOCK || g_nfq >= MAXFQ) return 0;
     if (g_defer_prog != prog) return 0;          // only inside a tracked step (it flushes the queue at the next one)
-    __try {
-        if (prog[0x1D] && *(uint8_t**)(prog + 0x30) == part && *(uint8_t**)part == nullptr) return 0;   // last of a one-shot
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     g_fq[g_nfq++] = { prog, part };
     InterlockedIncrement(&g_fq_total);
     return 1;
 }
 
-static void free_flush(void* prog, bool drop) {
-    int w = 0;
+static int free_flush(void* prog, bool drop) {
+    int w = 0, freed = 0;
     for (int i = 0; i < g_nfq; i++) {
         FreeQ q = g_fq[i];
         if (q.prog != prog) { g_fq[w++] = q; continue; }
@@ -160,8 +157,23 @@ static void free_flush(void* prog, bool drop) {
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
         InterlockedIncrement(done ? &g_fq_freed : &g_fq_dropped);
+        if (done) freed++;
     }
     g_nfq = w;
+    return freed;
+}
+
+// A one-shot program (+0x1D) ends when its list is empty after a step (Ppp_ProgramStep tail `return prog+0x30 == 0`).
+// When the deferred free of its last particle empties the list, the step that would have reported the end has already
+// returned "running"; report the end now, without running another step (no spawn in a step stock never ran).
+static volatile LONG g_fq_ends = 0;
+static bool flush_ended(void* prog) {
+    if (!free_flush(prog, false)) return false;
+    __try {
+        uint8_t* pr = (uint8_t*)prog;
+        if (pr[0x1D] && *(void**)(pr + 0x30) == nullptr) { InterlockedIncrement(&g_fq_ends); return true; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
 }
 
 #define FREE_STUB(N)                                                                          __declspec(naked) static void h_free##N() {                                                       __asm { pushad }                                                                              __asm { push dword ptr [ebp + 8] }                                                            __asm { push esi }                                                                            __asm { call free_defer }                                                                     __asm { add esp, 8 }                                                                          __asm { mov g_fq_ret, eax }                                                                   __asm { popad }                                                                               __asm { cmp g_fq_ret, 0 }                                                                     __asm { je replay }                                                                           __asm { sub dword ptr [esi + 0xC], 0x1000 }                                                   __asm { jmp dword ptr [g_free_keep + N * 4] }                                                 __asm { replay: }                                                                             __asm { mov dword ptr [edx], edi }                                                            __asm { push 0 }                                                                              __asm { push esi }                                                                            __asm { call dword ptr [g_pfree] }                                                            __asm { mov edx, dword ptr [ebp - 0x20] }                                                     __asm { add esp, 8 }                                                                          __asm { jmp dword ptr [g_free_after + N * 4] }                                            }
@@ -169,8 +181,13 @@ FREE_STUB(0)
 FREE_STUB(1)
 
 static int step_deferred(void* prog, uint32_t flags, bool will_pause, ppp_step_t step = nullptr) {
-    if (g_nfq && (!will_pause || pacing_kind() == INV_STOCK)) free_flush(prog, false);   // deferred frees first
     if (!step) step = g_tramp;
+    if (g_nfq && (!will_pause || pacing_kind() == INV_STOCK)) {               // deferred frees first
+        if (step == g_tramp) {                                             // Ppp_ProgramStep: nonzero = ended
+            if (flush_ended(prog)) { if (g_deferred_n) deferred_flush(prog, true); return 1; }
+        }
+        else free_flush(prog, false);                                      // field step: return value not proven
+    }
     if (!g_loopdefer || pacing_kind() == INV_STOCK) {
         if (g_deferred_n) deferred_flush(prog, false);           // stock step (e.g. a menu holds pacing): apply first
         int r0 = step(prog, flags);
@@ -386,7 +403,8 @@ static void post() {
     if (g_freedefer && now - last_fq >= 10000 && g_fq_total != last_fq_total) {
         last_fq = now;
         last_fq_total = g_fq_total;
-        log_line("X2-FX-011-FREEDEFER: deferred %ld freed %ld dropped %ld (queued now %d)", g_fq_total, g_fq_freed, g_fq_dropped, g_nfq);
+        log_line("X2-FX-011-FREEDEFER: deferred %ld freed %ld dropped %ld one-shot ends %ld (queued now %d)", g_fq_total, g_fq_freed,
+                 g_fq_dropped, g_fq_ends, g_nfq);
     }
     static LONG ov_seen = 0;
     if (g_override_skipped && !ov_seen) {
