@@ -98,7 +98,7 @@ static int g_diff = 0;
 static int g_diff_phase = 0;                        // 1 wait fresh state 1, 2 wait prompt, 3 wait retry setup, 4 wait retry state 1
 // Watched regions: [0] FFX.exe's largest writable section (.data with bss); [1] the heap allocation that holds the
 // battle file buffer DAT_0112a9a8 (outside .data, D 18/10/2026 03:09:52), found at the fresh copy.
-struct DiffRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* end; };
+struct DiffRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* end; uint8_t* ok; };   // ok: per 4 KB page, 1 = in both copies
 static DiffRgn g_rgn[2];
 enum { HEAP_MAX = 0x3000000 };
 
@@ -106,6 +106,7 @@ static uint8_t* diff_buf(uint32_t len) { return (uint8_t*)VirtualAlloc(nullptr, 
 static void diff_free(DiffRgn& r) {
     if (r.fresh) VirtualFree(r.fresh, 0, MEM_RELEASE);
     if (r.end) VirtualFree(r.end, 0, MEM_RELEASE);
+    if (r.ok) VirtualFree(r.ok, 0, MEM_RELEASE);
     memset(&r, 0, sizeof(r));
 }
 
@@ -121,8 +122,8 @@ static bool diff_alloc() {
         if (len > d.len) { d.p = exe_base() + sec[i].VirtualAddress; d.len = len; }
     }
     if (!d.len) return false;
-    d.fresh = diff_buf(d.len); d.end = diff_buf(d.len);
-    if (!d.fresh || !d.end) {
+    d.fresh = diff_buf(d.len); d.end = diff_buf(d.len); d.ok = diff_buf(d.len / 0x1000 + 1);
+    if (!d.fresh || !d.end || !d.ok) {
         log_line("QOL-RETRY-DIFF: no memory for 2 x 0x%X bytes - off", d.len);
         diff_free(d);
         g_diff = 0;
@@ -158,9 +159,17 @@ static void diff_heap_find() {
         lo = s; if (hi - lo > HEAP_MAX) hi = lo + HEAP_MAX;
     }
     h.p = lo; h.len = (uint32_t)(hi - lo) & ~3u;
-    h.fresh = diff_buf(h.len); h.end = diff_buf(h.len);
-    if (!h.fresh || !h.end) { log_line("QOL-RETRY-DIFF: no memory for the heap span 0x%X", h.len); diff_free(h); return; }
+    h.fresh = diff_buf(h.len); h.end = diff_buf(h.len); h.ok = diff_buf(h.len / 0x1000 + 1);
+    if (!h.fresh || !h.end || !h.ok) { log_line("QOL-RETRY-DIFF: no memory for the heap span 0x%X", h.len); diff_free(h); return; }
     log_line("QOL-RETRY-DIFF: battle file buffer %p in allocation %p; watching %p..%p (0x%X bytes)", file, base, lo, hi, h.len);
+}
+
+// The heap span can be decommitted between the copies (D 18/10/2026 03:16:11: the end copy faulted, the row went off
+// with the prompt up and the battle hung): copy and compare only pages that are committed and readable.
+static bool page_readable(const uint8_t* p) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return false;
+    return !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && (mbi.Protect & 0xFF) != 0;
 }
 
 static void hex16(char* out, const uint8_t* p, uint32_t n) {
@@ -203,6 +212,7 @@ static void diff_report() {
             }
         };
         for (uint32_t i = 0; i < n; i++) {
+            if ((i & 0x3FF) == 0 && !(r.ok[i >> 10] && page_readable(r.p + i * 4))) { i += 0x3FF; continue; }
             uint32_t c = cur[i];
             if (c == fr[i]) continue;
             changed++;
@@ -222,8 +232,16 @@ static void diff_report() {
 }
 
 static void diff_copy(bool fresh) {
-    for (int k = 0; k < 2; k++)
-        if (g_rgn[k].fresh) memcpy(fresh ? g_rgn[k].fresh : g_rgn[k].end, g_rgn[k].p, g_rgn[k].len);
+    for (int k = 0; k < 2; k++) {
+        DiffRgn& r = g_rgn[k];
+        if (!r.fresh) continue;
+        for (uint32_t off = 0, pg = 0; off < r.len; off += 0x1000, pg++) {
+            uint32_t n = r.len - off < 0x1000 ? r.len - off : 0x1000;
+            bool ok = page_readable(r.p + off) && page_readable(r.p + off + n - 1);
+            if (ok) memcpy((fresh ? r.fresh : r.end) + off, r.p + off, n);
+            r.ok[pg] = fresh ? ok : (r.ok[pg] && ok);
+        }
+    }
 }
 
 static void diff_step() {                           // from pre(), each invocation
@@ -463,6 +481,10 @@ static void pre() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("QOL-RETRY: fault 0x%08lX in pre - row off", GetExceptionCode());
         row_QOLRETRY.on = 0;
+        // release the battle: the busy and focus detours stay installed and hold slot 7 while g_state == ST_PROMPT
+        if (g_state == ST_PROMPT) { __try { g_w_close(WIN); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+        g_state = ST_IDLE;
+        g_retry = false;
     }
 }
 
