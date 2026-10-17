@@ -206,7 +206,43 @@ static void report_pp() {
     memset(g_sc, 0, sizeof(g_sc));
     g_full = false;
 }
+// X2-DIAG-PPPOPS-DUMP (default ""): ops whose calls are dumped (kind, flag, program, particle, age, keydata, op data
+// block 0xB0 bytes, program +0x50..+0xDF) when the running step's program lies in a module whose name contains
+// X2-DIAG-PPPOPS-DUMP-MOD (default "magic_0681"). Max 1200 lines. U 17/10/2026: Full Throttle later glow stops blinking
+// when only the pppKeLnsLp / pppKeLnsArnd program steps unpaused on render-only; what differs at draw time.
+static bool  g_dump_op[MAXOPS];
+static char  g_dump_mod[64] = "";
+static LONG  g_dump_lines = 0;
+static void hexs(char* o, size_t cb, const uint8_t* p, int n) {
+    static const char hx[] = "0123456789ABCDEF";
+    size_t k = 0;
+    __try {
+        for (int i = 0; i < n && k + 3 < cb; i++) {
+            if (i && !(i & 3)) o[k++] = ' ';
+            o[k++] = hx[p[i] >> 4]; o[k++] = hx[p[i] & 15];
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    o[k] = 0;
+}
+static void dump_call(int i, uint8_t* part, uint8_t* key, uint8_t* opd) {
+    if (g_dump_lines >= 1200) return;
+    int cls = 0;
+    uint8_t* prog = (uint8_t*)mag006_cur_step(&cls);
+    if (!prog) return;
+    char mod[64]; uint32_t off;
+    module_of(prog, mod, sizeof(mod), &off);
+    if (!strstr(mod, g_dump_mod)) return;
+    g_dump_lines++;
+    int doff = 0, age = 0, kt = 0;
+    __try { doff = **(int**)(opd + 0xC); age = *(int*)(part + 0xC); kt = *(int*)key; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    static char d[512], pr[512];
+    hexs(d, sizeof(d), part + 0xA0 + doff, 0xB0);
+    hexs(pr, sizeof(pr), prog + 0x50, 0x90);
+    log_line("PPPDUMP #%ld %s f%d %s+0x%X %s part %p age %X key %X | data %s | prog50 %s", g_inv, render_only() ? "R" : "L",
+             *g_pause != 0, mod, off, g_name[i] + 3, part, age, kt, d, pr);
+}
 template <int I> static void __cdecl h_op(void* a, void* b, void* c) {
+    if (g_dump_op[I]) dump_call(I, (uint8_t*)a, (uint8_t*)b, (uint8_t*)c);
     InterlockedIncrement(*g_pause ? &g_paused[I] : &g_live[I]);
     note_pp(I);
     if (g_trace[I]) note_chain(I);
@@ -281,6 +317,14 @@ static bool install() {
             size_t L = strlen(g_name[i]);
             while (hit && ((hit > tq && hit[-1] != ' ' && hit[-1] != ',') || (hit[L] && hit[L] != ' ' && hit[L] != ','))) hit = strstr(hit + 1, g_name[i]);
             g_tr_op[i] = hit != nullptr;
+        }
+        config_str("rows", "X2-DIAG-PPPOPS-DUMP", tq, sizeof(tq), "");
+        config_str("rows", "X2-DIAG-PPPOPS-DUMP-MOD", g_dump_mod, sizeof(g_dump_mod), "magic_0681");
+        for (int i = 0; i < g_n; i++) {
+            const char* hit = strstr(tq, g_name[i]);
+            size_t L = strlen(g_name[i]);
+            while (hit && ((hit > tq && hit[-1] != ' ' && hit[-1] != ',') || (hit[L] && hit[L] != ' ' && hit[L] != ','))) hit = strstr(hit + 1, g_name[i]);
+            g_dump_op[i] = hit != nullptr;
         }
         config_str("rows", "X2-MAG-006-UNPAUSE-OPS", tq, sizeof(tq), "");
         for (int i = 0; i < g_n; i++) {
