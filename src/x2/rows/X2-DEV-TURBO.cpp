@@ -33,11 +33,11 @@ static volatile bool g_held = false;
 // cdecl(float delta) -> float in ST0. The original still runs (its own booster state and events).
 static float __cdecl h_scale(float delta) {
     float r = g_scale_tramp(delta);
-    return g_held ? delta * (float)g_speed : r;
+    return g_held && row_DEVTURBO.on ? delta * (float)g_speed : r;
 }
 
 static int __cdecl h_active() {
-    return g_held ? 1 : g_active_tramp();
+    return g_held && row_DEVTURBO.on ? 1 : g_active_tramp();
 }
 
 static bool install() {

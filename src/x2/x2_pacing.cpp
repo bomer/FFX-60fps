@@ -35,6 +35,12 @@ void pacing_hold_stock(const char* who, bool hold) {
     PLOG("pacing: %s %s stock pacing (holders now %d)", who, hold ? "holds" : "releases", g_hold);
 }
 
+void pacing_set(bool on) {
+    if ((g_cfg.pacing != 0) == on) return;
+    g_cfg.pacing = on ? 1 : 0;
+    log_line("pacing: %s at runtime", on ? "60 Hz" : "stock 30 Hz");
+}
+
 bool pacing_divider_request(uint32_t req) {
     uint32_t prev = g_wanted;
     g_wanted = req;

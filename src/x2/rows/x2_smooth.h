@@ -24,7 +24,10 @@ static const float SMOOTH_CUT_DIST = 500.0f;
 
 bool smooth_master();                    // [rows] X2-SMOOTH (default 1)
 bool smooth_live(int row = 0);           // runtime toggle (F7; Ctrl+F7 turns SMOOTH-00<row> alone off)
-void smooth_poll_hotkey();               // F7 edge; called from each SMOOTH row's pre()
+void smooth_poll_hotkey();
+bool smooth_get_live();                  // the F7 switch (X2-CFG-MENU)
+void smooth_set_live(bool on);
+               // F7 edge; called from each SMOOTH row's pre()
 
 // Interpolation: out = a..b at t for a world transform (row-vector, translation in
 // row 3, rows = scale x rotation): translation lerp, rotation slerp (quaternion of the row-normalised

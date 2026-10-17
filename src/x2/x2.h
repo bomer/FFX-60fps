@@ -32,6 +32,7 @@ extern Config g_cfg;
 void config_load();
 int  config_row(const char* row_id, int def);    // [rows] X2-ROW-ID=0|1
 void config_str(const char* sect, const char* key, char* out, int size, const char* def);   // ASCII string key
+bool config_write(const char* sect, const char* key, const char* value);   // fps60x2.ini (X2-CFG-MENU)
 
 // ---------------------------------------------------------------- x2_sigs.cpp
 uint8_t*    exe_base();
@@ -77,6 +78,7 @@ bool pacing_divider_request(uint32_t req);       // true = swallow
 int  pacing_kind();
 inline bool render_only() { return pacing_kind() == INV_BUILD; }
 void pacing_hold_stock(const char* who, bool hold); // a row asks for stock pacing (e.g. FMV)
+void pacing_set(bool on);                         // runtime 60 Hz on/off ([x2] pacing; X2-CFG-MENU)
 
 // ---------------------------------------------------------------- x2_magic_mods.cpp
 typedef void (*magic_load_fn)(uint8_t* base, uint32_t size, const char* name);   // loader lock
@@ -94,9 +96,14 @@ struct Row {
     void (*pre)();               // optional
     void (*post)();              // optional
     int         on;
+    int         installed;       // install() ran and succeeded at startup
 };
 void rows_install_all();
 bool row_on(const char* id);
+bool row_set(Row& r, bool on);                  // runtime on/off of an installed row (false: not installed)
+bool menu002_user_on();                         // X2-MENU-002 user switch (Num 9, X2-CFG-MENU)
+void menu002_set_user(bool on);
+const uint8_t* x2_text(int id);                 // T_* id (x2_text_strings.h) -> game-encoded text, current language
 void rows_pre();
 void rows_post();
 

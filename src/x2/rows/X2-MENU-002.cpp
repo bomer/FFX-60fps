@@ -64,6 +64,11 @@ static bool g_battle_menu = false;   // a 0x4000000 request was seen; never clai
 // the step (at the gate) and after it (task step) for the draws, and puts the stepped value back after the pass
 // (only if it still holds our midpoint).
 static int g_user_on = 1, g_t_tween = 1, g_t_point = 1, g_t_backdrop = 1;
+bool menu002_user_on() { return row_MENU002.on && g_user_on; }
+void menu002_set_user(bool on) {                  // X2-CFG-MENU: same switch as Num 9 (needs the row installed)
+    if (on && !row_set(row_MENU002, true)) return;
+    g_user_on = on ? 1 : 0;
+}
 static int g_drawreplay = 1;
 
 struct BlendVar { volatile uint8_t* p; int size; bool sgn; int* toggle; int32_t pre, post, mid; bool wrote; };
