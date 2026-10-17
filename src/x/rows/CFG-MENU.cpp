@@ -105,6 +105,24 @@ static void set_layout(int vis) {
 // Only the first run of digits is touched, and only when it reads the number that string is known to carry:
 // jp, kr and ch are multi-byte, and a trail byte can look like a digit further along. A translation that does
 // not spell the number where it is expected is used exactly as it is.
+// CFG-MENU-WIDE (default 1): a Config row's values are centred at 750 + 420 * index in the game's 1920-wide
+// design space (Cfg_DrawRow 0x8CBAE0; the x scaler 0x6447E0 is x * 512 / 1920), which fits three. The Frame
+// Rate row has four, and the fourth landed at 2010 - past the right edge, drawn off screen. Both constants
+// are re-read from .rdata for every value, so their operands are re-pointed at our own floats (the trick
+// CFG-MENU-ROWS already uses for the vertical layout) and a hook on the per-row draw tightens them while a
+// row with more than three values is being drawn. Rows with three or fewer keep the game's own spacing
+// exactly, so the stock rows are untouched. Without the patch the Frame Rate row drops to three values.
+static float g_val_base = 750.0f, g_val_step = 420.0f;
+static const float k_base = 750.0f, k_step = 420.0f;             // the game's own
+static const float k_wide_base = 690.0f, k_wide_step = 375.0f;   // 690 / 1065 / 1440 / 1815, clear of 1920
+enum { VAL_N = 5 };                                              // 3 step sites + 2 base sites
+static uint8_t* g_val_op[VAL_N];
+static uint32_t g_val_orig[VAL_N];
+static uint8_t* g_row_fn = nullptr;
+typedef void (__cdecl* rowdraw_t)(int, int, int);
+static rowdraw_t g_row_draw = nullptr;
+static int  g_fps_n = 3;                                         // values on the Frame Rate row (3 or 4)
+
 static int k_fps[4] = { 240, 120, 60, 0 };
 static uint8_t g_fps_label[40];
 static uint8_t g_fps_val[4][8];
@@ -154,7 +172,7 @@ static void build_fps_text() {
     while (fps_digit(lab[i])) i++;                               // the leading "60"
     if (i && lab[i] == 0x3A) i++;                                // the space the Latin languages put after it
     fps_copy(lab[i] ? lab + i : lab, g_fps_label, sizeof(g_fps_label));
-    for (int v = 0; v < 4; v++) {
+    for (int v = 0; v < g_fps_n; v++) {
         int f = k_fps[v] ? k_fps[v] : 30;
         int k = fps_put(g_fps_val[v], f);
         g_fps_val[v][k] = 0;
@@ -165,8 +183,9 @@ static void build_fps_text() {
 
 // The four rates the page offers, highest first, always including the one the player asked for.
 static void build_fps_values() {
+    int rates = g_fps_n - 1;                                     // the last value is always the stock 30
     int want[4] = { rate_user_fps(), 240, 180, 120 }, n = 0, pick[3];
-    for (int i = 0; i < 4 && n < 3; i++) {
+    for (int i = 0; i < 4 && n < rates; i++) {
         bool dup = false;
         for (int j = 0; j < n; j++) if (pick[j] == want[i]) dup = true;
         if (!dup) pick[n++] = want[i];
@@ -174,20 +193,20 @@ static void build_fps_values() {
     for (int i = 0; i < n; i++)                                  // highest first
         for (int j = i + 1; j < n; j++)
             if (pick[j] > pick[i]) { int t = pick[i]; pick[i] = pick[j]; pick[j] = t; }
-    for (int i = 0; i < 3; i++) k_fps[i] = i < n ? pick[i] : 60;
-    k_fps[3] = 0;
+    for (int i = 0; i < rates; i++) k_fps[i] = i < n ? pick[i] : 60;
+    k_fps[rates] = 0;
     build_fps_text();
 }
 
 static int  get_fps() {
-    if (!g_cfg.pacing) return 3;
+    if (!g_cfg.pacing) return g_fps_n - 1;
     int f = rate_user_fps();                                     // not a rate PERF-002 stepped down to
-    for (int i = 0; i < 3; i++) if (k_fps[i] == f) return i;
-    for (int i = 0; i < 3; i++) if (k_fps[i] <= f) return i;     // built from it, so this is only a safety net
-    return 2;
+    for (int i = 0; i < g_fps_n - 1; i++) if (k_fps[i] == f) return i;
+    for (int i = 0; i < g_fps_n - 1; i++) if (k_fps[i] <= f) return i;   // built from it: only a safety net
+    return g_fps_n - 2;
 }
 static void set_fps(int v) {
-    if (v < 0 || v > 3) return;
+    if (v < 0 || v >= g_fps_n) return;
     if (!k_fps[v]) { pacing_set(false); return; }
     if (k_fps[v] != rate_user_fps() && !rate_set_fps(k_fps[v])) return;   // refused: pacing is left as it was
     pacing_set(true);
@@ -326,6 +345,25 @@ static void __cdecl h_enter(void* desc) {
     g_enter(desc);
 }
 
+// Cfg_DrawRow(0, 0, idx). The row object is read from the live array rather than trusting idx, so it is right
+// whatever CFG-MENU-SCROLL is doing to the window.
+static void __cdecl h_rowdraw(int a, int b, int idx) {
+    bool wide = false;
+    if (!g_disabled && g_val_op[0]) {
+        __try {
+            void** arr = (void**)*g_array;
+            if (arr && idx >= 0 && idx < *g_count) {
+                void* ro = arr[idx];
+                for (int i = 0; i < N_OPTS; i++)
+                    if (ro == &g_rows[i]) { wide = g_rows[i].nvals > 3; break; }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    g_val_base = wide ? k_wide_base : k_base;
+    g_val_step = wide ? k_wide_step : k_step;
+    g_row_draw(a, b, idx);
+}
+
 static uint8_t* lookup(uint32_t id, bool help) {
     id &= 0xFFFF;
     if (g_fps_lang != ffx_text_lang()) build_fps_text();         // the player changed the game's text language
@@ -456,20 +494,73 @@ static bool install() {
         }
     }
 
+    if (config_row("CFG-MENU-WIDE", 1) && g_draw_fn) {
+        // The three reads of the value step and the two of the value base, all inside Cfg_DrawRow.
+        struct VSite { const char* name; const char* pat; uint32_t va; float want; };
+        static const VSite k_vsites[VAL_N] = {
+            { "value step (loop head)", "D9 05 ?? ?? ?? ?? 8D 43 1C B9 D0 01 00 00", 0x8CBD62, 420.0f },
+            { "value step (HD row)",    "D9 05 ?? ?? ?? ?? 83 C4 04 D9 1C 24 E8", 0x8CBDA1, 420.0f },
+            { "value step (loop tail)", "D9 05 ?? ?? ?? ?? 8B 8D F4 FD FF FF 83 AD F0 FD FF FF 02", 0x8CBFFF, 420.0f },
+            { "value base (HD row)",    "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? DC 85 E0 FD FF FF 8D 85 D8 FD FF FF", 0x8CBDCA, 750.0f },
+            { "value base",             "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? DC 85 E0 FD FF FF 56", 0x8CBE9D, 750.0f },
+        };
+        bool ok = true;
+        uint8_t* at[VAL_N] = {};
+        for (int i = 0; i < VAL_N && ok; i++) {
+            char nm[64];
+            _snprintf_s(nm, sizeof(nm), _TRUNCATE, "CFG-MENU-WIDE %s", k_vsites[i].name);
+            at[i] = sig_find_unique(nm, k_vsites[i].pat, k_vsites[i].va);
+            float* c = at[i] ? (float*)read_abs(at[i] + 2) : nullptr;
+            if (!c || *c != k_vsites[i].want) {
+                log_line("  CFG-MENU-WIDE: %s not found or constant %.1f != %.1f - Frame Rate row keeps 3 values",
+                         k_vsites[i].name, c ? *c : -1.0f, k_vsites[i].want);
+                ok = false;
+            }
+        }
+        // Cfg_DrawRow: the loop's own call target, cdecl(0, 0, row index)
+        g_row_fn = ok ? call_target(g_draw_fn + 0x15) : nullptr;
+        if (ok && (!g_row_fn || !sig_match(g_row_fn, "55 8B EC 81 EC 34 02 00 00"))) {
+            log_line("  CFG-MENU-WIDE: Cfg_DrawRow not at the loop's call target - Frame Rate row keeps 3 values");
+            ok = false;
+        }
+        if (ok) {
+            void* tgt[VAL_N] = { &g_val_step, &g_val_step, &g_val_step, &g_val_base, &g_val_base };
+            for (int i = 0; i < VAL_N && ok; i++) {
+                g_val_op[i] = at[i] + 2;
+                g_val_orig[i] = *(uint32_t*)g_val_op[i];
+                uint32_t v = (uint32_t)(uintptr_t)tgt[i];
+                ok = patch_write(g_val_op[i], &v, 4) && ok;
+            }
+            if (ok) {
+                g_fps_n = 4;
+                log_line("  CFG-MENU-WIDE: value base/step gva=0x%08X/0x%08X -> %.0f/%.0f while a 4-value row draws "
+                         "(stock %.0f/%.0f); Frame Rate row has 4 values",
+                         rt_to_gva_exe((void*)(uintptr_t)g_val_orig[3]), rt_to_gva_exe((void*)(uintptr_t)g_val_orig[0]),
+                         k_wide_base, k_wide_step, k_base, k_step);
+            } else {
+                for (int i = 0; i < VAL_N; i++) if (g_val_op[i]) patch_write(g_val_op[i], &g_val_orig[i], 4);
+                for (auto& op : g_val_op) op = nullptr;
+                log_line("  CFG-MENU-WIDE: operand patch failed - Frame Rate row keeps 3 values");
+            }
+        }
+        if (!ok) { g_row_fn = nullptr; for (auto& op : g_val_op) op = nullptr; }
+    }
+
     for (int i = 0; i < N_OPTS; i++) {
         const Opt& o = k_opts[i];
         CfgRow& r = g_rows[i];
         memset(&r, 0, sizeof(r));
-        r.nvals = o.nvals;
+        r.nvals = i == OPT_FPS ? g_fps_n : o.nvals;
         r.selectable = !o.enabled || o.enabled() ? 1 : 0;
         r.init = row_init;
         r.apply = row_apply;
         r.label = ID_LABEL + i;
-        for (int v = 0; v < o.nvals; v++) r.vals[v] = ID_VALUE + i * 4 + v;
+        for (int v = 0; v < r.nvals; v++) r.vals[v] = ID_VALUE + i * 4 + v;
     }
     ffx_text_init();
     build_fps_values();
-    log_line("  CFG-MENU: Frame Rate row offers %d / %d / %d / 30 fps", k_fps[0], k_fps[1], k_fps[2]);
+    if (g_fps_n == 4) log_line("  CFG-MENU: Frame Rate row offers %d / %d / %d / 30 fps", k_fps[0], k_fps[1], k_fps[2]);
+    else log_line("  CFG-MENU: Frame Rate row offers %d / %d / 30 fps", k_fps[0], k_fps[1]);
     log_line("  CFG-MENU: enter gva=0x%08X label gva=0x%08X help gva=0x%08X; cursor 0x%08X count 0x%08X array 0x%08X; %d rows",
              rt_to_gva_exe(g_enter_fn), rt_to_gva_exe(g_label_fn), rt_to_gva_exe(g_help_fn), rt_to_gva_exe((void*)g_cursor),
              rt_to_gva_exe((void*)g_count), rt_to_gva_exe((void*)g_array), N_OPTS);
@@ -490,6 +581,11 @@ static void pre() {
             return;
         }
         log_line("CFG-MENU: Config page hooked on the game thread");
+        if (g_row_fn && !hook_entry("CFG-MENU-WIDE row", g_row_fn, (void*)&h_rowdraw, (void**)&g_row_draw)) {
+            for (int i = 0; i < VAL_N; i++) if (g_val_op[i]) patch_write(g_val_op[i], &g_val_orig[i], 4);
+            for (auto& op : g_val_op) op = nullptr;
+            log_line("CFG-MENU-WIDE: row hook failed - stock value spacing, the 4th value would draw off screen");
+        }
         if (g_draw_fn && !hook_entry("CFG-MENU-SCROLL draw", g_draw_fn, (void*)&h_draw, (void**)&g_draw)) g_row0 = nullptr;
         else if (g_draw_fn) {
             if (g_lay_op[0]) {
@@ -514,6 +610,7 @@ static void stop() {
     if (g_lay_patched) {
         g_lay_patched = false;
         for (int i = 0; i < LAY_N; i++) if (g_lay_op[i]) patch_write(g_lay_op[i], &g_lay_orig[i], 4);
+        for (int i = 0; i < VAL_N; i++) if (g_val_op[i]) patch_write(g_val_op[i], &g_val_orig[i], 4);
     }
     __try {
         if (g_array && *g_array == (void*)g_arr && g_stock) { *g_array = g_stock; *g_count = g_stock_n; *g_cursor = 0; }
