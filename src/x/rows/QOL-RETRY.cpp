@@ -513,8 +513,78 @@ static void diff_step() {                           // from pre(), each invocati
     }
 }
 
+// QOL-RETRY-CHR (test, default 0): the battle reuses the chr object of a monster the field already shows (Yunalesca:
+// field worker 10, chr id 0x1082, worker +0x9C; the battle loads no monster chr, D 03:43..03:53). Her transformation
+// changes that object (motion set +0x72C 0x10821001 -> 0x10821002, attached parts from +0xD000: enable flags, states,
+// part motions), the stock game never reuses it after a wipe (title), and the retry started with her form-2 body
+// (U 18/10/2026). At battle setup the row copies each field-worker monster chr object (length = worker +0xA4 - +0x9C,
+// 0x13200 for her) and writes it back when Retry is chosen, before the battle is re-requested. Worker access as
+// FUN_00866240: FUN_0086a830(i), i < [0x01325BAC], field context 0x01325BA0 current.
+enum { CHRS_MAX = 4, CHRS_LEN_MAX = 0x20000 };
+struct ChrSnap { int idx; uint16_t id; uint8_t* obj; uint32_t len; uint8_t* copy; uint32_t cap; };
+static ChrSnap g_cs[CHRS_MAX];
+static int g_cs_n = 0, g_chrfix = 0;
+
+static void chr_take() {
+    uint8_t* eb = exe_base();
+    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
+    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
+    uint8_t* saved = *ctx;
+    *ctx = eb + (0x01325BA0 - 0x400000);
+    g_cs_n = 0;
+    __try {
+        int n = *(eb + (0x01325BAC - 0x400000));
+        for (int i = 0; i < n && g_cs_n < CHRS_MAX; i++) {
+            uint8_t* w = (uint8_t*)(uintptr_t)wk(i);
+            if (!w) continue;
+            uint16_t id = *(uint16_t*)(w + 0xA8);
+            uint8_t* obj = *(uint8_t**)(w + 0x9C);
+            uint8_t* nxt = *(uint8_t**)(w + 0xA4);
+            if ((id & 0xF000) != 0x1000 || !obj || nxt <= obj || (uint32_t)(nxt - obj) > CHRS_LEN_MAX) continue;
+            ChrSnap& c = g_cs[g_cs_n];
+            uint32_t len = (uint32_t)(nxt - obj);
+            if (c.cap < len) {
+                if (c.copy) VirtualFree(c.copy, 0, MEM_RELEASE);
+                c.copy = (uint8_t*)VirtualAlloc(nullptr, CHRS_LEN_MAX, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                c.cap = c.copy ? CHRS_LEN_MAX : 0;
+                if (!c.copy) continue;
+            }
+            memcpy(c.copy, obj, len);
+            c.idx = i; c.id = id; c.obj = obj; c.len = len;
+            g_cs_n++;
+            log_line("QOL-RETRY-CHR: field worker %d monster chr %04X object %p (0x%X bytes) copied", i, id, obj, len);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_line("QOL-RETRY-CHR: copy faulted - not restored on retry");
+        g_cs_n = 0;
+    }
+    *ctx = saved;
+}
+
+static void chr_put() {
+    uint8_t* eb = exe_base();
+    worker_t wk = (worker_t)(eb + (0x0086A830 - 0x400000));
+    uint8_t** ctx = (uint8_t**)(eb + (0x01326B28 - 0x400000));
+    uint8_t* saved = *ctx;
+    *ctx = eb + (0x01325BA0 - 0x400000);
+    __try {
+        for (int k = 0; k < g_cs_n; k++) {
+            ChrSnap& c = g_cs[k];
+            uint8_t* w = (uint8_t*)(uintptr_t)wk(c.idx);
+            if (!w || *(uint16_t*)(w + 0xA8) != c.id || *(uint8_t**)(w + 0x9C) != c.obj) {
+                log_line("QOL-RETRY-CHR: field worker %d no longer holds chr %04X at %p - left as is", c.idx, c.id, c.obj);
+                continue;
+            }
+            memcpy(c.obj, c.copy, c.len);
+            log_line("QOL-RETRY-CHR: field worker %d monster chr %04X object restored", c.idx, c.id);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { log_line("QOL-RETRY-CHR: restore faulted"); }
+    *ctx = saved;
+}
+
 static void __cdecl h_setup(uint32_t mode, int area, int group, int form) {
     if (g_state == ST_RELEASED) g_state = ST_IDLE;  // a new battle (or the retry): the prompt may arm again
+    if (g_chrfix && !g_disabled && mode == 0 && !g_reissue) chr_take();
     if (g_diff && mode == 0) {
         if (g_reissue && g_diff_phase == 3) { g_diff_phase = 4; diff_chr("retry setup"); }
         else if (!g_reissue && diff_alloc()) g_diff_phase = 1;
@@ -556,6 +626,7 @@ static int __cdecl h_post(int scripted, uint32_t key, int stage, int result) {
         g_retry = false;
         __try {
             restore();
+            if (g_chrfix) chr_put();
             rearm_request();
             g_post_args[0] = scripted; g_post_args[1] = (int)key; g_post_args[2] = stage; g_post_args[3] = result;
             g_reissue = 1;
@@ -755,6 +826,7 @@ static bool install() {
     g_style = config_row("QOL-RETRY-STYLE", 0);
     g_diff = config_row("QOL-RETRY-DIFF", 0);
     g_partfix = config_row("QOL-RETRY-PARTFIX", 0);
+    g_chrfix = config_row("QOL-RETRY-CHR", 0);
     if (g_diff)                                      // one match in fps60_image.bin
         g_chrload_fn = sig_find_unique("QOL-RETRY-DIFF load chr FUN_0082a1c0",
             "55 8B EC 81 EC 84 02 00 00 A1 ?? ?? ?? ?? 33 C5 89 45 FC 53 8B 5D 14 56 8B 75 08 57 68 80 00 00 00", 0x82A1C0);
