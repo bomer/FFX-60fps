@@ -100,7 +100,6 @@ static int g_diff_phase = 0;                        // 1 wait fresh state 1, 2 w
 // battle file buffer DAT_0112a9a8 (outside .data, D 18/10/2026 03:09:52), found at the fresh copy.
 struct DiffRgn { uint8_t* p; uint32_t len; uint8_t* fresh; uint8_t* end; uint8_t* ok; };   // ok: per 4 KB page, 1 = in both copies
 static DiffRgn g_rgn[2];
-enum { HEAP_MAX = 0x3000000 };
 
 static uint8_t* diff_buf(uint32_t len) { return (uint8_t*)VirtualAlloc(nullptr, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); }
 static void diff_free(DiffRgn& r) {
@@ -133,35 +132,16 @@ static bool diff_alloc() {
     return true;
 }
 
-// The committed span of the allocation holding the battle file buffer (all regions with its AllocationBase).
+// The first 64 KB of the battle file buffer DAT_0112a9a8.
 static void diff_heap_find() {
     DiffRgn& h = g_rgn[1];
     diff_free(h);
     uint8_t* file = *(uint8_t* volatile*)(g_a8e0 + 0xC8);   // DAT_0112a9a8: battle file buffer (MsBattleSetupEncounter)
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!file || !VirtualQuery(file, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) {
-        log_line("QOL-RETRY-DIFF: battle file buffer %p not committed - heap not watched", file);
-        return;
-    }
-    uint8_t* base = (uint8_t*)mbi.AllocationBase;
-    uint8_t* q = base;
-    uint8_t* lo = nullptr; uint8_t* hi = nullptr;
-    while (VirtualQuery(q, &mbi, sizeof(mbi)) && mbi.AllocationBase == base) {
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
-            if (!lo) lo = (uint8_t*)mbi.BaseAddress;
-            hi = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
-        } else if (lo) break;
-        q = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
-    }
-    if (!lo || file < lo || file >= hi) { log_line("QOL-RETRY-DIFF: battle file buffer %p: no readable span", file); return; }
-    if ((uint32_t)(hi - lo) > HEAP_MAX) {                  // keep a window around the file
-        uint8_t* s = file - HEAP_MAX / 4 < lo ? lo : file - HEAP_MAX / 4;
-        lo = s; if (hi - lo > HEAP_MAX) hi = lo + HEAP_MAX;
-    }
-    h.p = lo; h.len = (uint32_t)(hi - lo) & ~3u;
+    if (!file) { log_line("QOL-RETRY-DIFF: no battle file buffer - not watched"); return; }
+    h.p = file; h.len = 0x10000;                       // the allocation walk found no span (D 03:20); the copy is guarded
     h.fresh = diff_buf(h.len); h.end = diff_buf(h.len); h.ok = diff_buf(h.len / 0x1000 + 1);
-    if (!h.fresh || !h.end || !h.ok) { log_line("QOL-RETRY-DIFF: no memory for the heap span 0x%X", h.len); diff_free(h); return; }
-    log_line("QOL-RETRY-DIFF: battle file buffer %p in allocation %p; watching %p..%p (0x%X bytes)", file, base, lo, hi, h.len);
+    if (!h.fresh || !h.end || !h.ok) { log_line("QOL-RETRY-DIFF: no memory for the file copy"); diff_free(h); return; }
+    log_line("QOL-RETRY-DIFF: watching the battle file buffer %p (+0x%X)", file, h.len);
 }
 
 // The heap span can be decommitted between the copies (D 18/10/2026 03:16:11: the end copy faulted, the row went off
@@ -203,11 +183,11 @@ static void diff_report() {
             uint32_t off = start * 4, len = (last - start + 1) * 4;
             char a[64], b[64];
             hex16(a, r.fresh + off, len); hex16(b, r.p + off, len);
-            uint32_t addr = k == 0 ? rt_to_gva_exe(r.p + off) : (uint32_t)(uintptr_t)(r.p + off);
-            if (f) fprintf(f, "%s 0x%08X len 0x%X fresh [%s] retry [%s]\n", k == 0 ? "gva" : "heap", addr, len, a, b);
+            uint32_t addr = k == 0 ? rt_to_gva_exe(r.p + off) : off;
+            if (f) fprintf(f, "%s 0x%08X len 0x%X fresh [%s] retry [%s]\n", k == 0 ? "gva" : "file+", addr, len, a, b);
             if (logged < 40) {
                 logged++;
-                log_line("QOL-RETRY-DIFF: carried %s 0x%08X len 0x%X fresh [%s] retry [%s]", k == 0 ? "gva" : "heap", addr,
+                log_line("QOL-RETRY-DIFF: carried %s 0x%08X len 0x%X fresh [%s] retry [%s]", k == 0 ? "gva" : "file+", addr,
                          len, a, b);
             }
         };
@@ -216,9 +196,9 @@ static void diff_report() {
             uint32_t c = cur[i];
             if (c == fr[i]) continue;
             changed++;
-            if (c != en[i]) continue;
+            if (c != en[i] && k == 0) continue;     // the file: every difference from the fresh load
             carried++;
-            if (open && i - last <= 4) { last = i; continue; }
+            if (open && i - last <= (k == 0 ? 4u : 1u)) { last = i; continue; }
             if (open) flush();
             start = last = i; open = true;
         }
