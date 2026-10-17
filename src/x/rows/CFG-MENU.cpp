@@ -18,6 +18,7 @@
 #include "../fps60.h"
 #include "smooth.h"
 #include <string.h>
+#include <stdio.h>
 
 struct CfgRow {                                     // CONFIG-MENU-004
     uint32_t zero;
@@ -56,6 +57,33 @@ static bool g_dirty = false;
 static uint8_t* g_draw_fn = nullptr; static draw_t g_draw = nullptr;
 static volatile int32_t* g_row0 = nullptr;          // DAT_0186a438
 static int g_top = 0;
+
+// CFG-MENU-ROWS (default 14; 8 = the stock layout): rows visible at once. The row draw spaces rows 740/count apart
+// and sizes each row for 8 (bar 60 + 6 shadow, strip 54, text at +228, cursor at +232), so more rows need a smaller
+// layout (16 rows at stock sizes overlapped; bars alone shrunk cut through the text, U 16/10/2026). Six constant loads
+// in the Config-only draw functions point at the floats/doubles below instead of the shared .rdata constants:
+//   FUN_008cb530 0x8CB548 FLD [60.0] bar | FUN_008cbae0 0x8CBC7D FLD [54.0] strip, 0x8CBB0C FDIVR [740.0] list
+//   height, 0x8CBB9F / 0x8CBBF1 FADD [228.0] text y, 0x8CBCF3 FADD [232.0] cursor y.
+// With more than 8 visible rows the list is 780 high, bar = spacing - 6, strip = bar - 6, text centred in the bar.
+enum { LAY_BAR, LAY_STRIP, LAY_LIST, LAY_TEXT_A, LAY_TEXT_B, LAY_CURSOR, LAY_N };
+static uint8_t* g_lay_op[LAY_N];                    // address of each site's absolute operand
+static uint32_t g_lay_orig[LAY_N];
+static float    g_bar_h = 60.0f, g_strip_h = 54.0f;
+static double   g_list_h = 740.0, g_text_y = 228.0, g_cursor_y = 232.0;
+static bool     g_lay_patched = false;
+static int      g_vis = 14;
+
+static void set_layout(int vis) {
+    if (vis <= 8 || !g_lay_patched) { g_bar_h = 60.0f; g_strip_h = 54.0f; g_list_h = 740.0; g_text_y = 228.0; g_cursor_y = 232.0; return; }
+    g_list_h = 780.0;
+    double s = g_list_h / vis;
+    double bar = s - 6.0 < 60.0 ? s - 6.0 : 60.0;
+    g_bar_h = (float)bar;
+    g_strip_h = (float)(bar - 6.0);
+    g_text_y = 220.0 + (bar - 43.0) / 2.0;          // stock: bar 60, text at +228 (text about 43 high)
+    if (g_text_y < 220.0) g_text_y = 220.0;
+    g_cursor_y = g_text_y + 4.0;
+}
 
 // ---------------------------------------------------------------- options
 // v = value index as shown: binary rows are ON (0) / OFF (1), the stock order.
@@ -135,8 +163,10 @@ static void __cdecl row_apply(CfgRow* r) {
 
 // ---------------------------------------------------------------- detours
 static void __cdecl h_draw() {
-    if (g_disabled || !g_row0 || *g_array != (void*)g_arr || g_stock_n <= 0 || *g_count <= g_stock_n) { g_draw(); return; }
-    int n = *g_count, vis = g_stock_n, cur = *g_cursor;
+    if (g_disabled || !g_row0 || *g_array != (void*)g_arr || g_stock_n <= 0) { set_layout(8); g_draw(); return; }
+    int n = *g_count, vis = n > g_vis ? g_vis : n, cur = *g_cursor;
+    set_layout(vis);
+    if (n <= vis) { g_draw(); return; }
     if (cur < 0) cur = 0;
     if (cur >= n) cur = n - 1;
     if (cur < g_top) g_top = cur;
@@ -258,6 +288,40 @@ static bool install() {
         // Cfg_DrawRows: PUSH ESI; CALL; XOR ESI,ESI; CMP [count],ESI; JLE; loop { PUSH ESI; PUSH 0; PUSH 0; CALL row; ...}
         g_draw_fn = sig_find_unique("CFG-MENU-SCROLL Cfg_DrawRows",
             "56 E8 ?? ?? ?? ?? 33 F6 39 35 ?? ?? ?? ?? 7E 1B 56 6A 00 6A 00 E8 ?? ?? ?? ?? 83 C4 0C E8 ?? ?? ?? ?? 46 3B 35", 0x8CBAB0);
+        g_vis = config_row("CFG-MENU-ROWS", 14);
+        if (g_vis < 8) g_vis = 8;
+        if (g_vis > 16) g_vis = 16;
+        // Layout sites (CFG-MENU-ROWS > 8): pattern, expected VA, operand offset, expected constant
+        struct Site { const char* name; const char* pat; uint32_t va; int op; bool dbl; double val; };
+        static const Site k_sites[LAY_N] = {
+            { "bar height", "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 5D FC 83 C4 04 D9 45 FC D8 45 0C 68 00 00 00 26",
+              0x8CB548, 2, false, 60.0 },
+            { "strip height", "D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 D9 05 ?? ?? ?? ?? D9 1C 24 E8 ?? ?? ?? ?? D9 1C 24 51 DD 85 D0 FD FF FF",
+              0x8CBC7D, 2, false, 54.0 },
+            { "list height", "DB 05 ?? ?? ?? ?? 53 56 8B 75 10 D9 9D F4 FD FF FF 57 D9 85 F4 FD FF FF 56 DC 3D ?? ?? ?? ??",
+              0x8CBAF3, 0x1B, true, 740.0 },
+            { "text y (HD row)", "50 68 CD 01 00 00 E8 ?? ?? ?? ?? DD 85 D0 FD FF FF DC 05 ?? ?? ?? ?? D9 9D F8 FD FF FF",
+              0x8CBB8E, 0x13, true, 228.0 },
+            { "text y", "8D 85 FC FD FF FF EB 57 DD 85 D0 FD FF FF 83 EC 08 DC 05 ?? ?? ?? ?? D9 9D F8 FD FF FF",
+              0x8CBBE0, 0x13, true, 228.0 },
+            { "cursor y", "3B F0 75 40 DD 85 D0 FD FF FF 6A 00 DC 05 ?? ?? ?? ?? 51", 0x8CBCE7, 0x0E, true, 232.0 },
+        };
+        bool lay_ok = g_vis > 8;
+        for (int i = 0; i < LAY_N && lay_ok; i++) {
+            char nm[64];
+            _snprintf_s(nm, sizeof(nm), _TRUNCATE, "CFG-MENU-ROWS %s", k_sites[i].name);
+            uint8_t* at = sig_find_unique(nm, k_sites[i].pat, k_sites[i].va);
+            uint8_t* c = at ? read_abs(at + k_sites[i].op) : nullptr;
+            double v = !c ? -1.0 : k_sites[i].dbl ? *(double*)c : (double)*(float*)c;
+            if (!at || v != k_sites[i].val) {
+                log_line("  CFG-MENU-ROWS: %s not found or constant %.1f != %.1f - stock layout, 8 rows", k_sites[i].name, v, k_sites[i].val);
+                lay_ok = false;
+                break;
+            }
+            g_lay_op[i] = at + k_sites[i].op;
+            g_lay_orig[i] = *(uint32_t*)g_lay_op[i];
+        }
+        if (!lay_ok) { g_vis = 8; for (auto& op : g_lay_op) op = nullptr; }
         // Cfg_DrawRow 0x8CBB7D: ADD ESP,8; CMP ESI,[row0]; JNZ +0x60; LEA EAX,[EBP-0x204]; PUSH EAX; PUSH 0x1CD; CALL
         uint8_t* r0 = sig_find_unique("CFG-MENU-SCROLL HD row test",
             "83 C4 08 3B 35 ?? ?? ?? ?? 75 60 8D 85 FC FD FF FF 50 68 CD 01 00 00 E8", 0x8CBB7D);
@@ -302,7 +366,19 @@ static void pre() {
         }
         log_line("CFG-MENU: Config page hooked on the game thread");
         if (g_draw_fn && !hook_entry("CFG-MENU-SCROLL draw", g_draw_fn, (void*)&h_draw, (void**)&g_draw)) g_row0 = nullptr;
-        else if (g_draw_fn) log_line("CFG-MENU-SCROLL: %d rows visible, the list scrolls with the cursor", 8);
+        else if (g_draw_fn) {
+            if (g_lay_op[0]) {
+                void* tgt[LAY_N] = { &g_bar_h, &g_strip_h, &g_list_h, &g_text_y, &g_text_y, &g_cursor_y };
+                bool ok = true;
+                for (int i = 0; i < LAY_N; i++) {
+                    uint32_t v = (uint32_t)(uintptr_t)tgt[i];
+                    ok = patch_write(g_lay_op[i], &v, 4) && ok;
+                }
+                g_lay_patched = ok;
+                if (!ok) { log_line("CFG-MENU-ROWS: layout patch failed - 8 rows"); g_vis = 8; }
+            }
+            log_line("CFG-MENU-SCROLL: %d rows visible, the list scrolls with the cursor", g_vis);
+        }
     }
     if (g_dirty && g_desc_state && *g_desc_state > 3) write_ini();
 }
@@ -310,6 +386,10 @@ static void pre() {
 // Dev hot reload / off: the stock row list back (the game must not keep pointers into this copy), unsaved changes
 // written.
 static void stop() {
+    if (g_lay_patched) {
+        g_lay_patched = false;
+        for (int i = 0; i < LAY_N; i++) if (g_lay_op[i]) patch_write(g_lay_op[i], &g_lay_orig[i], 4);
+    }
     __try {
         if (g_array && *g_array == (void*)g_arr && g_stock) { *g_array = g_stock; *g_count = g_stock_n; *g_cursor = 0; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
