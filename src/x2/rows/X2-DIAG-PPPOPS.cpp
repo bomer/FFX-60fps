@@ -21,8 +21,28 @@ static int         g_n = 0;
 static volatile int32_t* g_pause = nullptr;
 static volatile LONG g_paused[MAXOPS], g_live[MAXOPS], g_last_paused[MAXOPS], g_last_live[MAXOPS];
 
+// X2-DIAG-PPPOPS-CALLERS (default "pppKeShpTail3X pppKeLnsFls"): for these ops, distinct call chains (5 return
+// addresses as gva) with counts and the pause state, logged with the 10 s counts (U 17/10/2026 Full Throttle glow:
+// these ops are never reached on paused steps; which dispatcher calls them).
+static bool g_trace[MAXOPS];
+struct Chain { uint32_t op; uint32_t f[5]; int paused; LONG n; };
+enum { MAXCH = 32 };
+static Chain g_ch[MAXCH];
+static int g_nch = 0;
+static void note_chain(int i) {
+    void* fr[6] = {};
+    USHORT k = RtlCaptureStackBackTrace(2, 5, fr, nullptr);
+    Chain c = {};
+    c.op = (uint32_t)i;
+    c.paused = *g_pause ? 1 : 0;
+    for (int j = 0; j < k && j < 5; j++) c.f[j] = in_image(fr[j]) ? rt_to_gva(fr[j]) : (uint32_t)(uintptr_t)fr[j];
+    for (int j = 0; j < g_nch; j++)
+        if (g_ch[j].op == c.op && g_ch[j].paused == c.paused && !memcmp(g_ch[j].f, c.f, sizeof(c.f))) { g_ch[j].n++; return; }
+    if (g_nch < MAXCH) { c.n = 1; g_ch[g_nch++] = c; }
+}
 template <int I> static void __cdecl h_op(void* a, void* b, void* c) {
     InterlockedIncrement(*g_pause ? &g_paused[I] : &g_live[I]);
+    if (g_trace[I]) note_chain(I);
     g_orig[I](a, b, c);
 }
 template <int... I> struct Tbl { static constexpr void* v[sizeof...(I)] = { (void*)&h_op<I>... }; };
@@ -86,6 +106,14 @@ static bool install() {
         if (!strcmp(g_name[i], key) && sig_match(g_fn[i] + 0x224, "83 3D ?? ?? ?? ?? 00 75"))
             g_pause = (volatile int32_t*)abs_operand("particle pause flag", g_fn[i] + 0x226);
     if (!g_pause) { log_line("  X2-DIAG-PPPOPS: pause flag not found - off"); return false; }
+    char tr[256];
+    config_str("rows", "X2-DIAG-PPPOPS-CALLERS", tr, sizeof(tr), "pppKeShpTail3X pppKeLnsFls");
+    for (int i = 0; i < g_n; i++) {
+        const char* hit = strstr(tr, g_name[i]);
+        size_t L = strlen(g_name[i]);
+        while (hit && ((hit > tr && hit[-1] != ' ' && hit[-1] != ',') || (hit[L] && hit[L] != ' ' && hit[L] != ','))) hit = strstr(hit + 1, g_name[i]);
+        g_trace[i] = hit != nullptr;
+    }
     log_line("  X2-DIAG-PPPOPS: %d records, %d distinct draw ops; pause flag gva=0x%08X; hooks at the first pre()", recs, g_n,
              rt_to_gva((const void*)g_pause));
     return g_n > 0;
@@ -113,6 +141,13 @@ static void post() {
         g_last_paused[i] = g_paused[i];
         g_last_live[i] = g_live[i];
         log_line("X2-DIAG-PPPOPS: %-30s gva=0x%08X  paused %ld  live %ld (10 s)", g_name[i], rt_to_gva(g_fn[i]), p, l);
+    }
+    for (int j = 0; j < g_nch; j++) {
+        Chain& c = g_ch[j];
+        if (!c.n) continue;
+        log_line("X2-DIAG-PPPOPS caller: %s %s x%ld <- %08X <- %08X <- %08X <- %08X <- %08X", g_name[c.op], c.paused ? "PAUSED" : "live",
+                 c.n, c.f[0], c.f[1], c.f[2], c.f[3], c.f[4]);
+        c.n = 0;
     }
 }
 
